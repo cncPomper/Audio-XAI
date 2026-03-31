@@ -24,10 +24,10 @@ You can either clone the public repository:
 git clone https://github.com/cncPomper/Audio-XAI
 ```
 
-Or download the [tarball](https://github.com/cncPomper/Audio-XAI/tarball/main):
+Or download the [tarball](https://github.com/cncPomper/Audio-XAI/tarball/master):
 
 ```sh
-curl -OJL https://github.com/cncPomper/Audio-XAI/tarball/main
+curl -OJL https://github.com/cncPomper/Audio-XAI/tarball/master
 ```
 
 Once you have a copy of the source, you can install it with:

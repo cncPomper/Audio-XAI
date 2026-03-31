@@ -3,7 +3,7 @@ name: Workflow security analysis
 on:
   push:
     branches:
-      - main
+      - master
     paths:
       - ".github/workflows/**"
   pull_request:
