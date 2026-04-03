@@ -25,9 +25,13 @@ license = {text = "MIT"}
 dependencies = [
   "typer",
   "rich",
-  "tensorboard>=2.20.0",
 ]
 requires-python = ">= 3.12"
+
+[project.optional-dependencies]
+tensorboard = [
+  "tensorboard>=2.20.0",
+]
 
 [dependency-groups]
 dev = [
