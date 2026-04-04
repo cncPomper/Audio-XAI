@@ -57,8 +57,11 @@ Audio XAI was created in 2026 by Piotr Kitłowski.
 
 Built with [Cookiecutter](https://github.com/cookiecutter/cookiecutter) and the [audreyfeldroy/cookiecutter-pypackage](https://github.com/audreyfeldroy/cookiecutter-pypackage) project template.
 
-cluster. (Estimated resource requirements: 25–30 hours of GPU computing for iterative processes). |
-| **11.05.2026 - 17.05.2026** | Scripting the execution of the entire experiment using the `just` tool and CLI libraries (e.g., `typer`). Aggregating tables containing the results. |
-| **18.05.2026 - 24.05.2026** | Finalization of the work: creating documentation and clear instructions for using the finished system. Organizing the code in accordance with PEP8. Preparation of the paper(?) |
 
-</div>
+## 2. Planned scope of experiments
+
+- Datasets: Public datasets such as the Speech Commands Dataset (speech) and Sonics (synthetic/real music) will be used. The project will strictly ensure the immutability of the original data.
+- Research models: Utilization and adaptation of audio recognition architectures: Audio Spectrogram Transformer, VGGish, Spectra, and ViT.
+- XAI methods: Investigation of the vulnerability of gradient-based methods such as Grad-CAM and Integrated Gradients.
+- Perceptual constraints: Instead of optimizing attacks against standard metrics, perceptual metrics will be considered (PESQ and STOI for speech, PEAQ for music).
+- Computational resources and training: The project will require hardware acceleration (GPUs with a minimum of 16 GB VRAM). The estimated training and fine-tuning time for the base models is approximately 15 hours, while the main process of optimizing perceptual perturbations (XAI attack) for the entire test set is estimated to take an additional 25–30 hours of computation.
