@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - master
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
 
 permissions: {}
 
@@ -38,6 +44,7 @@ jobs:
   deploy:
     name: Deploy
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       pages: write
