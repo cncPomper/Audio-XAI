@@ -56,3 +56,9 @@ just qa
 Audio XAI was created in 2026 by Piotr Kitłowski.
 
 Built with [Cookiecutter](https://github.com/cookiecutter/cookiecutter) and the [audreyfeldroy/cookiecutter-pypackage](https://github.com/audreyfeldroy/cookiecutter-pypackage) project template.
+
+cluster. (Estimated resource requirements: 25–30 hours of GPU computing for iterative processes). |
+| **11.05.2026 - 17.05.2026** | Scripting the execution of the entire experiment using the `just` tool and CLI libraries (e.g., `typer`). Aggregating tables containing the results. |
+| **18.05.2026 - 24.05.2026** | Finalization of the work: creating documentation and clear instructions for using the finished system. Organizing the code in accordance with PEP8. Preparation of the paper(?) |
+
+</div>
