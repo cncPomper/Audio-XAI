@@ -45,6 +45,13 @@ class TestSpectra:
         x = torch.zeros(1, 2, 64, 64)
         assert model(x).shape == (1, 527)
 
+    def test_pretrained_requires_hf_model_name(self) -> None:
+        """Spectra(pretrained=True) without an hf_model_name must raise ValueError."""
+        from audio_xai.models import Spectra
+
+        with pytest.raises(ValueError, match="hf_model_name"):
+            Spectra(pretrained=True)
+
 
 # ---------------------------------------------------------------------------
 # AudioViT
