@@ -67,3 +67,10 @@ The main objective of the project is to investigate the perceptual fragility of 
 - XAI methods: Investigation of the vulnerability of gradient-based methods such as Grad-CAM and Integrated Gradients.
 - Perceptual constraints: Instead of optimizing attacks against standard metrics, perceptual metrics will be considered (PESQ and STOI for speech, PEAQ for music).
 - Computational resources and training: The project will require hardware acceleration (GPUs with a minimum of 16 GB VRAM). The estimated training and fine-tuning time for the base models is approximately 15 hours, while the main process of optimizing perceptual perturbations (XAI attack) for the entire test set is estimated to take an additional 25–30 hours of computation.
+
+## 3. Planned Program Features
+
+- **Classification and Attribution Module**: Reading models and generating explanation maps for them.
+- **Perturbation module**: Generating subtle modifications to the audio signal with optimization that preserves high perceptual metrics (PESQ, PEAQ, STOI and ViSQOL).
+- **Deployment and Automation**: Scripted building, testing, and deployment of applications using tools such as just and Python scripts built with typer or argparse.
+- **Final deliverables**: The project will include clear documentation, user instructions, and tests relevant to the project’s scope.
