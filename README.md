@@ -57,6 +57,8 @@ Audio XAI was created in 2026 by Piotr Kitłowski.
 
 Built with [Cookiecutter](https://github.com/cookiecutter/cookiecutter) and the [audreyfeldroy/cookiecutter-pypackage](https://github.com/audreyfeldroy/cookiecutter-pypackage) project template.
 
+## 1. General Information and Project Objective
+The main objective of the project is to investigate the perceptual fragility of explanations (XAI methods) for deep learning models in the audio domain while keeping predictions unchanged.
 
 ## 2. Planned scope of experiments
 
