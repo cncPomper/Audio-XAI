@@ -2,7 +2,7 @@
 
 ![PyPI version](https://img.shields.io/pypi/v/Audio-XAI.svg)
 
-Python Boilerplate contains all the boilerplate you need to create a Python package.
+XAI for audio models
 
 * [GitHub](https://github.com/cncPomper/Audio-XAI/) | [PyPI](https://pypi.org/project/Audio-XAI/) | [Documentation](https://cncPomper.github.io/Audio-XAI/)
 * Created by [Piotr Kitłowski](https://audrey.feldroy.com/) | GitHub [@cncPomper](https://github.com/cncPomper) | PyPI [@pkitlo](https://pypi.org/user/pkitlo/)
