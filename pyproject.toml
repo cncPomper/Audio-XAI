@@ -24,15 +24,28 @@ classifiers = [
 ]
 license = {text = "MIT"}
 dependencies = [
+  "pre-commit",
+  "ipython",
+  "jupyterlab",
+  "loguru",
+  "matplotlib",
+  "mkdocs",
+  "notebook",
+  "numpy",
+  "pandas",
+  "pip",
+  "pytest",
+  "python-dotenv",
+  "scikit-learn",
+  "tqdm",
   "typer",
   "rich",
+  "tensorboard",
+  "torch",
+  "torchvision",
+  "torchaudio",
 ]
 requires-python = ">= 3.12"
-
-[project.optional-dependencies]
-tensorboard = [
-  "tensorboard>=2.20.0",
-]
 
 [dependency-groups]
 dev = [
@@ -86,7 +99,7 @@ select = [
 [tool.coverage.run]
 branch = true
 parallel = true
-source = ["src/", "tests/"]
+source = ["audio_xai/", "tests/"]
 
 [tool.coverage.report]
 show_missing = true
