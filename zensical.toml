@@ -24,4 +24,4 @@ toggle.icon = "material/brightness-4"
 toggle.name = "Switch to light mode"
 
 [project.plugins.mkdocstrings.handlers.python]
-paths = ["src"]
+paths = ["audio_xai"]
