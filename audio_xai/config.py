@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -7,8 +8,15 @@ from loguru import logger
 load_dotenv()
 
 # Paths
-PROJ_ROOT = Path(__file__).resolve().parents[1]
-logger.info(f"PROJ_ROOT path is: {PROJ_ROOT}")
+PROJ_ROOT = Path(__file__).resolve().parents[0]
+
+VERBOSE_ENV = os.getenv("AUDIO_XAI_VERBOSE", "0").strip().lower()
+VERBOSE_ENABLED = VERBOSE_ENV in {"1", "true", "yes", "on"}
+
+if VERBOSE_ENABLED:
+    logger.info(f"PROJ_ROOT path is: {PROJ_ROOT}")
+else:
+    logger.trace(f"PROJ_ROOT path is: {PROJ_ROOT}")
 
 DATA_DIR = PROJ_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
@@ -32,5 +40,4 @@ try:
         pass
     logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
 except ModuleNotFoundError:
-    pass
     pass
