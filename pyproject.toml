@@ -44,6 +44,7 @@ dependencies = [
   "torch",
   "torchvision",
   "torchaudio",
+  "yt_dlp",
 ]
 requires-python = ">= 3.12"
 
