@@ -24,6 +24,19 @@ API documentation is auto-generated from docstrings using [mkdocstrings](https:/
 
 Docs deploy automatically on push to `master` via GitHub Actions. To enable this, go to your repo's Settings > Pages and set the source to **GitHub Actions**.
 
+## Setup
+
+If you don't have `ffmpeg` installed, run:
+```
+winget install -e --id Gyan.FFmpeg
+```
+
+Then verify the installation:
+```
+ffmpeg -version
+ffprobe -version
+```
+
 ## Development
 
 To set up for local development:
