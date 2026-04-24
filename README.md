@@ -26,9 +26,10 @@ Docs deploy automatically on push to `master` via GitHub Actions. To enable this
 
 ## Setup
 
+If you don't have `ffmpeg` installed, run:
+
 ### Windows 11
 
-If you don't have `ffmpeg` installed, run:
 ```
 winget install -e --id Gyan.FFmpeg
 ```
