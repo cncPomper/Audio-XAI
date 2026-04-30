@@ -54,9 +54,9 @@ site/
 # .vscode/
 
 # metrics and fetching files
-audio_xai/fetching_and_metrics/fake_songs
-audio_xai/fetching_and_metrics/real_songs
-audio_xai/fetching_and_metrics/perturbed_songs
-audio_xai/fetching_and_metrics/fake_songs.csv
-audio_xai/fetching_and_metrics/real_songs.csv
+# audio_xai/fetching_and_metrics/fake_songs
+# audio_xai/fetching_and_metrics/real_songs
+# audio_xai/fetching_and_metrics/perturbed_songs
+# audio_xai/fetching_and_metrics/fake_songs.csv
+# audio_xai/fetching_and_metrics/real_songs.csv
 audio_xai/fetching_and_metrics/audio_xai
