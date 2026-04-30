@@ -44,11 +44,13 @@ dependencies = [
   "torch",
   "torchvision",
   "torchaudio",
+  "torchmetrics",
   "yt_dlp",
   "librosa",
   "soundfile",
   "pystoi",
   "pesq",
+  "audio-metrics",
   "zimtohrli==0.2.1.post1",
 ]
 requires-python = ">= 3.12"
