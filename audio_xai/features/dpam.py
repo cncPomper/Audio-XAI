@@ -1,6 +1,6 @@
 """DPAM – Deep Perceptual Audio Metric.
 
-PyTorch / Python >=3.8 port of the original TensorFlow 1.14 implementation:
+PyTorch / Python >=3.12 port of the original TensorFlow 1.14 implementation:
   https://github.com/pranaymanocha/PerceptualAudio
 
 Usage (mirrors the original pip API)::
