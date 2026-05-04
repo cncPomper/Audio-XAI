@@ -1,6 +1,7 @@
 import os
+
 import soundfile as sf
-from datasets import load_dataset, Audio, ClassLabel
+from datasets import Audio, load_dataset
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION

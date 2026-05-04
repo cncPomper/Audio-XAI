@@ -11,19 +11,19 @@ import os
 import re
 import time
 
+import cdpam
 import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
-import cdpam
+from peaq_implementation import peaq_like
+from pymcd.mcd import Calculate_MCD
 from pystoi import stoi
+from scipy.stats import entropy
 from torchmetrics.audio.pesq import PerceptualEvaluationSpeechQuality
 from zimtohrli import mos_from_signals
-from scipy.stats import entropy
-from pymcd.mcd import Calculate_MCD
-from peaq_implementation import peaq_like
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -125,9 +125,7 @@ def distort_signal(
     ref = ref.float().clone()
     noisy = ref + noise_std * torch.randn_like(ref)
     gain_lin = 10 ** (gain_db / 20.0)
-    distorted = torchaudio.functional.lowpass_biquad(
-        noisy * gain_lin, sample_rate=sample_rate, cutoff_freq=lowpass_hz
-    )
+    distorted = torchaudio.functional.lowpass_biquad(noisy * gain_lin, sample_rate=sample_rate, cutoff_freq=lowpass_hz)
     return torch.clamp(distorted, -1.0, 1.0)
 
 
@@ -414,9 +412,7 @@ if __name__ == "__main__":
         # --- PERTURBACJE (Oryginalna część) ---
         y_perturbed = add_noise(y_fake)
         sf.write(path_perturbed, y_perturbed, CDPAM_SR)
-        y_perturbed_pesq = librosa.resample(
-            y_perturbed, orig_sr=CDPAM_SR, target_sr=PESQ_SR
-        )
+        y_perturbed_pesq = librosa.resample(y_perturbed, orig_sr=CDPAM_SR, target_sr=PESQ_SR)
         t_pert_pesq = torch.tensor(y_perturbed_pesq).float()
 
         t0 = time.time()

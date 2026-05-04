@@ -1,8 +1,9 @@
+from math import gcd
+
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly, get_window
 from scipy.fft import rfft, rfftfreq
-from math import gcd
+from scipy.signal import get_window, resample_poly
 
 # =========================
 # Pomocnicze
@@ -24,9 +25,7 @@ def read_wav(path, target_sr=48000, verbose=True):
     if verbose:
         print(f"[read_wav] {path}")
         print(f"  sr={sr}, shape={x.shape}, dtype={x.dtype}")
-        print(
-            f"  min={np.min(x):.6f}, max={np.max(x):.6f}, rms={np.sqrt(np.mean(x*x)):.6f}"
-        )
+        print(f"  min={np.min(x):.6f}, max={np.max(x):.6f}, rms={np.sqrt(np.mean(x * x)):.6f}")
 
     if sr != target_sr:
         g = gcd(sr, target_sr)

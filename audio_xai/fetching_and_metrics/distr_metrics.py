@@ -1,7 +1,8 @@
 import os
-import torch
+
 import librosa
 import numpy as np
+import torch
 
 # ---------------------------------------------------------------------------
 # KONFIGURACJA
@@ -17,9 +18,7 @@ SAMPLE_RATE = 22050
 # ---------------------------------------------------------------------------
 
 
-def calculate_kad(
-    embeddings_ref: torch.Tensor, embeddings_gen: torch.Tensor, sigma: float = 1.0
-) -> float:
+def calculate_kad(embeddings_ref: torch.Tensor, embeddings_gen: torch.Tensor, sigma: float = 1.0) -> float:
     """
     Oblicza Kernel Audio Distance (unbiased MMD^2).
     Oczekuje tensorów o kształcie [N, D] (liczba utworów, wymiar cech).
