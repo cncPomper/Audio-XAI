@@ -103,6 +103,7 @@ class GradCAMBase(ABC):
 
         # The model's gradients w.r.t. its target layer's activations.
         # retain_graph=True so the caller can still backprop the heatmap loss.
+        assert self._activations is not None, "Forward hook did not fire — check target_layer"
         grads = torch.autograd.grad(
             score,
             self._activations,
