@@ -1,7 +1,7 @@
 import os
 
 import soundfile as sf
-from datasets import Audio, load_dataset
+from datasets import Audio, Dataset as HFDataset, load_dataset
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -31,15 +31,10 @@ def main():
         trust_remote_code=True,
     ).cast_column("audio", Audio(sampling_rate=16000))
 
-    # Resolve label names from the dataset's ClassLabel feature
-    info = load_dataset(
-        "google/speech_commands",
-        VERSION,
-        split=SPLIT,
-        streaming=True,
-        trust_remote_code=True,
-    ).features["label"]
-    label_names = info.names  # list[str], index == label int
+    # Resolve label names from a non-streaming load (streaming datasets lack .features).
+    _info_ds = load_dataset("google/speech_commands", VERSION, split=SPLIT, trust_remote_code=True)
+    assert isinstance(_info_ds, HFDataset)
+    label_names = _info_ds.features["label"].names  # list[str], index == label int
 
     silence_idx = label_names.index("_silence_") if "_silence_" in label_names else -1
 
