@@ -195,18 +195,31 @@ def perceptual_xai_attack(
 
 
 def topk_overlap(cam_a: torch.Tensor, cam_b: torch.Tensor, k_frac: float = 0.1) -> torch.Tensor:
-    """Compute the per-sample Jaccard (intersection-over-union) overlap between the top-k fraction of pixels in two heatmaps.
+    """Jaccard overlap of top-k% pixels between two heatmaps.
 
-    k is determined as max(1, int(k_frac * N_pixels)); overlap values lie in [0.0, 1.0].
+    Range [0, 1]. Lower = more disagreement = more successful attack.
 
-    Returns:
-        overlaps (torch.Tensor): Jaccard overlap for each sample [0.0, 1.0].
+    Parameters
+    ----------
+    cam_a, cam_b : tensors of identical shape [B, ...] with at least 2 dims.
+    k_frac : fraction of pixels to treat as "top-k"; must be in (0, 1].
     """
+    if cam_a.ndim < 2 or cam_b.ndim < 2:
+        raise ValueError(f"cam_a and cam_b must have at least 2 dimensions, got cam_a.ndim={cam_a.ndim}, cam_b.ndim={cam_b.ndim}")
+    if cam_a.shape != cam_b.shape:
+        raise ValueError(f"cam_a and cam_b must have the same shape, got cam_a.shape={cam_a.shape}, cam_b.shape={cam_b.shape}")
+    if not (0.0 < k_frac <= 1.0):
+        raise ValueError(f"k_frac must be in (0, 1], got k_frac={k_frac!r}")
+
     B = cam_a.shape[0]
     flat_a = cam_a.flatten(start_dim=1)
     flat_b = cam_b.flatten(start_dim=1)
     n_pixels = flat_a.shape[1]
-    k = max(1, int(k_frac * n_pixels))
+
+    if n_pixels == 0:
+        raise ValueError("cam_a and cam_b have 0 pixels after flattening — cannot compute topk overlap")
+
+    k = min(max(1, int(k_frac * n_pixels)), n_pixels)
 
     _, idx_a = flat_a.topk(k, dim=1)
     _, idx_b = flat_b.topk(k, dim=1)
@@ -218,7 +231,8 @@ def topk_overlap(cam_a: torch.Tensor, cam_b: torch.Tensor, k_frac: float = 0.1) 
         inter = len(sa & sb)
         union = len(sa | sb)
         overlaps.append(inter / union if union > 0 else 0.0)
-    return torch.tensor(overlaps)
+
+    return cam_a.new_tensor(overlaps, dtype=torch.float32)
 
 
 def heatmap_ssim(cam_a: torch.Tensor, cam_b: torch.Tensor) -> torch.Tensor:
