@@ -61,11 +61,11 @@ def masking_threshold(
     """Computes the per-frame psychoacoustic masking threshold for a batch waveform.
 
     Parameters:
-        waveform (torch.Tensor): Audio tensor shaped [B, T], where B is batch size and T is time samples.
-        db_offset (float): SPL calibration offset applied to STFT magnitudes so thresholds align with typical listening levels; 90 dB SPL is the standard MPEG choice.
+        waveform (torch.Tensor): Audio tensor [B, T]; B is batch size, T is time samples.
+        db_offset (float): SPL offset for STFT magnitudes; 90 dB SPL is MPEG standard.
 
     Returns:
-        threshold_db (torch.Tensor): Tensor shaped [B, n_freq, n_frames] containing the dB level above which spectral energy at each frequency/time bin is considered audible under the model.
+        threshold_db (torch.Tensor): Masked threshold dB levels [B, n_freq, n_frames].
     """
     device = waveform.device
     window = torch.hann_window(n_fft, device=device)
@@ -119,15 +119,15 @@ def perturbation_audibility_loss(
     """Compute the mean squared audible excess of a perturbation relative to a masking threshold.
 
     Parameters:
-        delta (torch.Tensor): Perturbation waveform, shape [B, T] (batch-first) or broadcastable to that shape; values are audio samples.
-        threshold_db (torch.Tensor): Masking threshold in dB SPL with shape [B, n_freq, n_frames] (or broadcastable to the STFT output); values are dB levels to compare against.
+        delta (torch.Tensor): Perturbation waveform [B, T]; batch-first format.
+        threshold_db (torch.Tensor): Masking threshold dB SPL [B, n_freq, n_frames].
         sample_rate (int): Sample rate used for STFT (informational; does not affect computation here).
         n_fft (int): FFT size used to compute the STFT.
         hop_length (int): Hop length (frame advance) used for the STFT.
         db_offset (float): Calibration offset added to 20*log10(magnitude) to express magnitudes in dB SPL.
 
     Returns:
-        torch.Tensor: Scalar loss equal to the mean of squared positive dB differences (delta_db - threshold_db). Returns `0.0` if the perturbation is at or below the threshold everywhere.
+        torch.Tensor: Scalar loss (mean squared positive dB above threshold; 0.0 if below).
     """
     window = torch.hann_window(n_fft, device=delta.device)
     delta_spec = torch.stft(delta, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)

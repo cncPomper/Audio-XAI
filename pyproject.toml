@@ -102,6 +102,7 @@ audio_xai = "audio_xai.cli:app"
 
 [tool.ruff]
 line-length = 150
+extend-exclude = ["scripts/"]
 
 [tool.ruff.format]
 # Enable reformatting of code snippets in docstrings.
@@ -116,6 +117,10 @@ select = [
     "B",    # flake8-bugbear
     "UP",   # pyupgrade
     "D",    # pydocstyle (highly recommended for docstring consistency)
+]
+
+ignore = [
+    "D100", "D101", "D102", "D103", "D104", "D105", "D107", "D205"  # Skip docstring requirements
 ]
 
 [tool.ruff.lint.per-file-ignores]

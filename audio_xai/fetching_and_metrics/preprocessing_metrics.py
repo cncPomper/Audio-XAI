@@ -214,7 +214,7 @@ def compute_zimtohrli(path_a: str, path_b: str, sr: int = ZIMTOHRLI_SR) -> float
 
 
 def compute_snr(y_a: np.ndarray, y_b: np.ndarray) -> float:
-    """SNR: Stosunek sygnału do szumu (y_a = referencja, y_b = wygenerowany)"""
+    """SNR: Stosunek sygnału do szumu (y_a = referencja, y_b = wygenerowany)."""
     min_len = min(len(y_a), len(y_b))
     ref, gen = y_a[:min_len], y_b[:min_len]
 
@@ -283,7 +283,7 @@ def compute_kl_divergence(y_a: np.ndarray, y_b: np.ndarray) -> float:
 
 
 def compute_mcd(mcd_calc, path_a: str, path_b: str) -> float:
-    """MCD: Mel-Cepstral Distortion (wymaga ścieżek do plików)"""
+    """MCD: Mel-Cepstral Distortion (wymaga ścieżek do plików)."""
     return float(mcd_calc.calculate_mcd(path_a, path_b))
 
 

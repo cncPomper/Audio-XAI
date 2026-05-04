@@ -31,11 +31,12 @@ class _VGGishBackbone(nn.Module):
         """Constructs the VGGish-like convolutional feature extractor and its 128‑dimensional embedding head.
 
         Initializes two modules on the instance:
-        - self.features: a sequential convolutional backbone (Conv2d/ReLU/MaxPool blocks) that maps a single-channel spectrogram patch to a deep feature map with 512 channels.
-        - self.embedding: a sequential head that flattens the backbone output and projects it through fully connected layers to a 128-dimensional embedding.
+        - self.features: convolutional backbone mapping spectrograms to 512-channel feature maps.
+        - self.embedding: head flattening features and projecting to 128-D embeddings via FC layers.
 
         Notes:
-        - The embedding linear layer sizes assume the backbone output spatial resolution is 6 × 4 (e.g., an input patch that yields 96 time frames and 64 mel bins after four pooling operations).
+        - The embedding linear layer sizes assume the backbone output
+            spatial resolution is 6 × 4 (e.g., an input patch that yields 96 time frames and 64 mel bins after four pooling operations).
         """
         super().__init__()
         self.features = nn.Sequential(
@@ -112,10 +113,12 @@ class VGGishBinary(AudioClassifier):
         """Convert a batch of raw waveforms into log-mel spectrogram patches sized for the VGGish backbone.
 
         Parameters:
-            waveform (torch.Tensor): Waveforms with shape [B, T], sampled at VGGISH_SAMPLE_RATE. Each batch element is converted to a mel spectrogram and normalized to decibels.
+            waveform (torch.Tensor): Waveforms with shape [B, T], sampled at VGGISH_SAMPLE_RATE.
+                Each batch element is converted to a mel spectrogram and normalized to decibels.
 
         Returns:
-            torch.Tensor: Tensor of log-mel spectrogram patches with shape [B, 1, VGGISH_N_MELS, VGGISH_FRAMES_PER_PATCH]. Spectrograms are padded or truncated on the time axis so each patch has exactly VGGISH_FRAMES_PER_PATCH frames.
+            torch.Tensor: Tensor of log-mel spectrogram patches with shape [B, 1, VGGISH_N_MELS, VGGISH_FRAMES_PER_PATCH].
+                Spectrograms are padded or truncated on the time axis so each patch has exactly VGGISH_FRAMES_PER_PATCH frames.
         """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)

@@ -45,7 +45,7 @@ class RealFakeLitModule(LightningModule):
     def __init__(self, model: AudioClassifier, lr: float = 1e-4, weight_decay: float = 1e-5):
         """Initialize the Lightning module for binary real/fake audio classification.
 
-        Configures the wrapped audio classifier, optimizer hyperparameters, loss criterion, evaluation metrics, and per-epoch buffers for accumulating validation scores and labels used to compute EER.
+        Configures classifier, optimizer hyperparameters, loss, metrics, and EER buffers.
 
         Parameters:
             model (AudioClassifier): The underlying audio classification model to train and evaluate.
@@ -69,7 +69,7 @@ class RealFakeLitModule(LightningModule):
         """Perform a forward pass for a single batch and extract training/metric outputs.
 
         Parameters:
-            batch (tuple[torch.Tensor, torch.Tensor]): A pair (wav, label) where `wav` is the input audio tensor and `label` contains integer class labels.
+            batch (tuple[torch.Tensor, torch.Tensor]): Batch pair (wav, label); wav is audio, label is class indices.
 
         Returns:
             tuple: A 4-tuple containing:
@@ -106,7 +106,7 @@ class RealFakeLitModule(LightningModule):
         and log validation metrics.
 
         Parameters:
-            batch (tuple): A validation batch, expected as (wav, label) where `wav` is the input audio tensor and `label` contains integer class labels.
+            batch (tuple): Validation batch as (wav, label); wav is audio, label contains class indices.
 
         Notes:
             - Buffers `self._val_scores` and `self._val_labels` are appended for later EER computation in on_validation_epoch_end.
@@ -138,6 +138,6 @@ class RealFakeLitModule(LightningModule):
         """Create an AdamW optimizer configured for this module's parameters.
 
         Returns:
-            optimizer: An instance of torch.optim.AdamW using this module's parameters with the configured learning rate (`self.lr`) and weight decay (`self.weight_decay`).
+            optimizer: AdamW with this module's params, lr=self.lr, weight_decay=self.weight_decay.
         """
         return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

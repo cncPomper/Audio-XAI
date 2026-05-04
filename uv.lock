@@ -310,6 +310,7 @@ dependencies = [
     { name = "pystoi" },
     { name = "pytest" },
     { name = "python-dotenv" },
+    { name = "pytorch-lightning" },
     { name = "resampy" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -371,6 +372,7 @@ requires-dist = [
     { name = "pystoi" },
     { name = "pytest" },
     { name = "python-dotenv" },
+    { name = "pytorch-lightning" },
     { name = "resampy" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -3617,6 +3619,25 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f7/ff/3cc9165fd44106973cd7ac9facb674a65ed853494592541d339bdc9a30eb/python_json_logger-4.1.0.tar.gz", hash = "sha256:b396b9e3ed782b09ff9d6e4f1683d46c83ad0d35d2e407c09a9ebbf038f88195", size = 17573, upload-time = "2026-03-29T04:39:56.805Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/27/be/0631a861af4d1c875f096c07d34e9a63639560a717130e7a87cbc82b7e3f/python_json_logger-4.1.0-py3-none-any.whl", hash = "sha256:132994765cf75bf44554be9aa49b06ef2345d23661a96720262716438141b6b2", size = 15021, upload-time = "2026-03-29T04:39:55.266Z" },
+]
+
+[[package]]
+name = "pytorch-lightning"
+version = "2.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec", extra = ["http"] },
+    { name = "lightning-utilities" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "torch" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/ac/ebd5f6f58691cbd4f73836e43e1727f3814311b960c41f88e259606ca2b2/pytorch_lightning-2.6.1.tar.gz", hash = "sha256:ba08f8901cf226fcca473046ad9346f414e99117762dc869c76e650d5b3d7bdc", size = 665563, upload-time = "2026-01-30T14:59:11.636Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/93/c8c361bf0a2fe50f828f32def460e8b8a14b93955d3fd302b1a9b63b19e4/pytorch_lightning-2.6.1-py3-none-any.whl", hash = "sha256:1f8118567ec829e3055f16cf1aa320883a86a47c836951bfd9dcfa34ec7ffd59", size = 857273, upload-time = "2026-01-30T14:59:10.141Z" },
 ]
 
 [[package]]

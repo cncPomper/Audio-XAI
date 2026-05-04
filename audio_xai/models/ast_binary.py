@@ -27,11 +27,9 @@ AST_STD = 4.5689974
 
 class ASTBinary(AudioClassifier):
     def __init__(self, pretrained: bool = True):
-        """Constructs an ASTBinary instance with an AST backbone and Torch-based differentiable audio preprocessing.
+        """Constructs ASTBinary with AST backbone and differentiable audio preprocessing.
 
-        When `pretrained=True`, loads the Hugging Face AST checkpoint configured for 2 labels (allowing mismatched sizes).
-        When `pretrained=False`, instantiates a fresh AST model configuration for 2 labels. Also sets up differentiable, device-local preprocessing modules:
-        - a MelSpectrogram configured with the module-level AST constants (sample rate, n_fft, hop_length, n_mels, f_min=0, f_max=sample_rate/2, power=2.0) and an AmplitudeToDB transform (stype="power", top_db=80) for log-mel conversion.
+        Loads HF AST checkpoint (pretrained=True) or initializes fresh config for 2 labels. Sets up MelSpectrogram and AmplitudeToDB transforms.
 
         Parameters:
             pretrained (bool): If true, load pretrained AST weights; otherwise initialize a new AST model.
@@ -65,10 +63,10 @@ class ASTBinary(AudioClassifier):
         """Convert a batch of waveforms into AST-compatible, normalized log-mel feature frames.
 
         Parameters:
-            waveform (torch.Tensor): Batch of audio waveforms with shape [B, T]; samples expected in the range [-1, 1].
+            waveform (torch.Tensor): Audio batch [B, T]; samples in [-1, 1].
 
         Returns:
-            torch.Tensor: Log-mel features shaped [B, AST_TARGET_FRAMES, AST_N_MELS], normalized using AST_MEAN and AST_STD. The time axis is padded or trimmed to exactly AST_TARGET_FRAMES.
+            torch.Tensor: Log-mel features [B, AST_TARGET_FRAMES, AST_N_MELS], normalized; time axis padded/trimmed.
         """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)  # log-mel

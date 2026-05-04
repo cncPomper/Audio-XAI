@@ -22,7 +22,7 @@ def hz_to_bark(f):
 def read_wav(path, target_sr=48000, verbose=True):
     """Read an audio file and return a 2-D float64 waveform and its sample rate, optionally resampling to a target rate.
 
-    Reads `path` with channels preserved as a 2-D array (shape: samples x channels). If the file's sample rate differs from `target_sr`, the audio is resampled to `target_sr` before being returned. The returned waveform is cast to `np.float64`.
+    Reads `path` as 2-D array (samples x channels), resamples to `target_sr` if needed, and casts to `np.float64`.
 
     Parameters:
         path (str): Path to the audio file to read.
@@ -30,7 +30,7 @@ def read_wav(path, target_sr=48000, verbose=True):
         verbose (bool, optional): If True, print file info and resampling details. Default is True.
 
     Returns:
-        tuple[np.ndarray, int]: A tuple (x, sr) where `x` is a 2-D numpy array of dtype `np.float64` (samples x channels) and `sr` is the sample rate (Hz) after any resampling.
+        tuple[np.ndarray, int]: Tuple (x, sr) with 2-D float64 array and sample rate.
     """
     x, sr = sf.read(path, always_2d=True)
 

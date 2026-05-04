@@ -87,7 +87,7 @@ def perceptual_xai_attack(
     """Run the perceptual XAI adversarial attack on a batch of waveforms.
 
     Parameters:
-        model (AudioClassifier): The trained audio classifier (caller should set model to the desired mode; evaluation mode is recommended because dropout/BN affect behaviour).
+        model (AudioClassifier): Trained audio classifier (evaluation mode recommended).
         x (torch.Tensor): Input waveforms of shape [B, T] on the same device as the model.
         cfg (AttackConfig | None): Attack hyperparameters; defaults to AttackConfig() when None.
         gradcam (GradCAMBase | None): Optional pre-built Grad-CAM instance; if None a suitable Grad-CAM for the model is created.
@@ -200,7 +200,7 @@ def topk_overlap(cam_a: torch.Tensor, cam_b: torch.Tensor, k_frac: float = 0.1) 
     k is determined as max(1, int(k_frac * N_pixels)); overlap values lie in [0.0, 1.0].
 
     Returns:
-        overlaps (torch.Tensor): 1-D tensor of length B containing the Jaccard overlap for each sample; each value is intersection_size / union_size (0.0 if union is 0).
+        overlaps (torch.Tensor): Jaccard overlap for each sample [0.0, 1.0].
     """
     B = cam_a.shape[0]
     flat_a = cam_a.flatten(start_dim=1)
