@@ -43,7 +43,7 @@ class ASTBinary(AudioClassifier):
                 ignore_mismatched_sizes=True,
             )
         else:
-            cfg = ASTConfig(num_labels=2)  # type: ignore[call-arg, unknown-argument]
+            cfg = ASTConfig()  # type: ignore[call-arg, unknown-argument]
             self.backbone = ASTForAudioClassification(cfg)
 
         # Differentiable mel spectrogram. kept on the same device as the model.
