@@ -16,12 +16,12 @@ Usage: python tests/test_attack_smoke.py
 from __future__ import annotations
 
 import torch
+
 from audio_xai.attacks.perceptual_xai_attack import (
     AttackConfig,
     perceptual_xai_attack,
     topk_overlap,
 )
-
 from audio_xai.models.vggish_binary import VGGishBinary
 
 
