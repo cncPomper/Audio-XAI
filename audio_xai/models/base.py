@@ -32,19 +32,49 @@ class AudioClassifier(nn.Module, ABC):
 
     @abstractmethod
     def waveform_to_features(self, waveform: torch.Tensor) -> torch.Tensor:
-        """[B, T] waveform -> [B, C, F, T'] spectrogram-like features.
-
-        Must be differentiable end-to-end (no detach, no numpy roundtrip).
+        """
+        Convert a batch of raw waveforms into spectrogram-like feature tensors for classification.
+        
+        Parameters:
+            waveform (torch.Tensor): Input waveforms with shape [B, T], where B is batch size and T is time samples.
+        
+        Returns:
+            torch.Tensor: Feature tensor with shape [B, C, F, T'] (channels, frequency bins, time frames) suitable for downstream classification.
+        
+        Notes:
+            This transformation must be end-to-end differentiable (no detach or CPU/NumPy round-trips).
         """
 
     @abstractmethod
     def features_to_logits(self, features: torch.Tensor) -> torch.Tensor:
-        """[B, C, F, T'] features -> [B, n_classes] logits."""
+        """
+        Map spectrogram-like features to classification logits.
+        
+        Parameters:
+            features (torch.Tensor): Input features with shape [B, C, F, T'].
+        
+        Returns:
+            torch.Tensor: Logits with shape [B, n_classes], where each row contains unnormalized class scores.
+        """
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        """
+        Compute logits for a batch of input waveforms.
+        
+        Parameters:
+            waveform (torch.Tensor): Input waveform tensor with shape [B, T], where B is batch size and T is number of time samples.
+        
+        Returns:
+            torch.Tensor: Logits with shape [B, n_classes].
+        """
         return self.features_to_logits(self.waveform_to_features(waveform))
 
     @property
     @abstractmethod
     def target_layer(self) -> nn.Module:
-        """Layer used as the Grad-CAM hook point."""
+        """
+        The neural network module where Grad-CAM hooks should be attached.
+        
+        Returns:
+            layer (nn.Module): The module instance to attach Grad-CAM hooks to (provides activations and gradients).
+        """

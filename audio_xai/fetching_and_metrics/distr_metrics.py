@@ -20,8 +20,15 @@ SAMPLE_RATE = 22050
 
 def calculate_kad(embeddings_ref: torch.Tensor, embeddings_gen: torch.Tensor, sigma: float = 1.0) -> float:
     """
-    Oblicza Kernel Audio Distance (unbiased MMD^2).
-    Oczekuje tensorów o kształcie [N, D] (liczba utworów, wymiar cech).
+    Compute the Kernel Audio Distance (an unbiased MMD^2 estimate using an RBF kernel) between two sets of embeddings.
+    
+    Parameters:
+        embeddings_ref (torch.Tensor): Reference embeddings with shape [N, D] where N >= 0 is number of samples and D is feature dimension.
+        embeddings_gen (torch.Tensor): Generated embeddings with shape [M, D] where M >= 0 is number of samples and D matches reference features.
+        sigma (float): RBF kernel bandwidth (standard deviation).
+    
+    Returns:
+        float: The KAD value (sum of intra-set kernel terms minus twice the cross-set term). Returns `nan` if either input has fewer than 2 samples.
     """
     # --- NAPRAWA: Normalizacja L2 ---
     # Skaluje wektory, zapobiegając ucięciu wyniku do zera przez funkcję exp()

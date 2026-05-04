@@ -111,9 +111,20 @@ def distort_signal(
     lowpass_hz: float = 7000.0,
 ) -> torch.Tensor:
     """
-    Apply additive noise + gain + low-pass distortion.
-
-    Returns distorted mono [1, T] tensor clipped to [-1, 1].
+    Apply additive Gaussian noise, apply a gain in decibels, and apply a low-pass biquad filter to an input waveform.
+    
+    Parameters:
+        ref_waveform (torch.Tensor): Input audio of shape [T] or [C, T]. If 2-D, channels are averaged to produce mono before processing.
+        sample_rate (int): Sample rate of the input waveform in Hz (used by the low-pass filter).
+        noise_std (float): Standard deviation of the additive Gaussian noise applied to the signal.
+        gain_db (float): Gain to apply in decibels before filtering (negative values attenuate).
+        lowpass_hz (float): Cutoff frequency for the low-pass biquad filter in Hz.
+    
+    Returns:
+        torch.Tensor: Processed mono waveform of shape [1, T] with samples clipped to the range [-1.0, 1.0].
+    
+    Raises:
+        ValueError: If `ref_waveform` does not have shape [T] or [C, T].
     """
     if ref_waveform.dim() == 1:
         ref = ref_waveform.unsqueeze(0)
