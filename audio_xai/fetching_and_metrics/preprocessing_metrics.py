@@ -65,7 +65,7 @@ def load_audio(path: str):
     return y, tensor_cdpam, tensor_pesq, y_pesq
 
 
-def load_for_visualization(path: str, sr: int = VIZ_SR, duration: float = None):
+def load_for_visualization(path: str, sr: int = VIZ_SR, duration: float | None = None):
     """Load mono audio for waveform / mel-spectrogram visualisation."""
     audio, _ = librosa.load(path, sr=sr, mono=True, duration=duration)
     return audio, sr
@@ -285,9 +285,9 @@ def _init_cdpam():
         kwargs["weights_only"] = False
         return original_load(*args, **kwargs)
 
-    torch.load = _load_unsafe
+    torch.load = _load_unsafe  # type: ignore[assignment]
     model = cdpam.CDPAM(dev="cpu")
-    torch.load = original_load
+    torch.load = original_load  # type: ignore[assignment]
     return model
 
 
