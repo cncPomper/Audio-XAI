@@ -109,40 +109,69 @@ class VGGishBinary(AudioClassifier):
 
     def waveform_to_features(self, waveform: torch.Tensor) -> torch.Tensor:
         # waveform: [B, T]
-        """Convert a batch of raw waveforms into log-mel spectrogram patches sized for the VGGish backbone.
+        """Convert a batch of raw waveforms into tiled log-mel spectrogram patches for the VGGish backbone.
+
+        The full spectrogram is computed and then divided into consecutive non-overlapping patches of
+        VGGISH_FRAMES_PER_PATCH frames. If the spectrogram length is not an exact multiple of
+        VGGISH_FRAMES_PER_PATCH, the end is zero-padded to make it so (no frames are discarded).
 
         Parameters:
-            waveform (torch.Tensor): Waveforms with shape [B, T], sampled at VGGISH_SAMPLE_RATE. Each batch element is converted to a mel spectrogram and normalized to decibels.
+            waveform (torch.Tensor): Waveforms with shape [B, T], sampled at VGGISH_SAMPLE_RATE.
 
         Returns:
-            torch.Tensor: Tensor of log-mel spectrogram patches with shape [B, 1, VGGISH_N_MELS, VGGISH_FRAMES_PER_PATCH]. Spectrograms are padded or truncated on the time axis so each patch has exactly VGGISH_FRAMES_PER_PATCH frames.
+            torch.Tensor: Tiled log-mel spectrogram patches with shape
+            [B, num_patches, 1, VGGISH_N_MELS, VGGISH_FRAMES_PER_PATCH], where
+            num_patches = ceil(frames / VGGISH_FRAMES_PER_PATCH).
         """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)
-        # Take the first 96-frame window for simplicity; for production,
-        # tile into multiple patches and average logits.
+
         F = VGGISH_FRAMES_PER_PATCH
-        if spec.shape[-1] < F:
-            spec = nn.functional.pad(spec, (0, F - spec.shape[-1]))
-        spec = spec[..., :F]
-        # Add channel dim and put time on last axis: [B, 1, n_mels, F].
-        return spec.unsqueeze(1)
+        frames = spec.shape[-1]
+
+        # Pad end so length is an exact multiple of F (never truncates).
+        remainder = frames % F
+        if remainder != 0:
+            spec = nn.functional.pad(spec, (0, F - remainder))
+
+        num_patches = spec.shape[-1] // F
+        B, n_mels, _ = spec.shape
+
+        # Reshape: [B, n_mels, num_patches * F] -> [B, num_patches, 1, n_mels, F]
+        spec = spec.reshape(B, n_mels, num_patches, F)   # [B, n_mels, P, F]
+        spec = spec.permute(0, 2, 1, 3)                  # [B, P, n_mels, F]
+        return spec.unsqueeze(2)                          # [B, P, 1, n_mels, F]
 
     def features_to_logits(self, features: torch.Tensor) -> torch.Tensor:
-        """Convert a batch of spectrogram patch tensors into 2-class logits using the backbone embedding and linear head.
+        """Convert tiled spectrogram patches into 2-class logits, averaging over patches.
+
+        Accepts either the tiled output of waveform_to_features (5-D) or a single-patch
+        tensor (4-D) for backward compatibility with Grad-CAM hooks that see individual patches.
 
         Parameters:
-                features (torch.Tensor): Spectrogram patches shaped [B, 1, n_mels, F], where F is the frames-per-patch (typically 96).
+            features (torch.Tensor): Either:
+                - [B, num_patches, 1, n_mels, F] — tiled patches from waveform_to_features; logits
+                  are computed per-patch and averaged over the patch dimension before returning.
+                - [B, 1, n_mels, F] — single patch; processed directly, returning [B, 2].
 
         Returns:
-                logits (torch.Tensor): Unnormalized class scores with shape [B, 2].
+            torch.Tensor: Unnormalized class scores with shape [B, 2].
         """
-        emb = self.backbone(features)
-        return self.head(emb)
+        if features.dim() == 5:
+            B, P, C, n_mels, F = features.shape
+            # Flatten batch and patch dims, process all patches in one forward pass.
+            flat = features.reshape(B * P, C, n_mels, F)   # [B*P, 1, n_mels, F]
+            emb = self.backbone(flat)                        # [B*P, 128]
+            logits = self.head(emb)                          # [B*P, 2]
+            logits = logits.reshape(B, P, 2)                 # [B, P, 2]
+            return logits.mean(dim=1)                        # [B, 2]
+        else:
+            emb = self.backbone(features)
+            return self.head(emb)
 
     @property
     def target_layer(self) -> nn.Module:
-        # Last conv layer — canonical Grad-CAM target.
+
         """Get the backbone's final convolutional layer used as the canonical Grad-CAM target.
 
         Returns:
