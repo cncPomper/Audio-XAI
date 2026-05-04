@@ -138,6 +138,8 @@ class RealFakeLitModule(LightningModule):
         all_scores = self.all_gather(scores)
         all_labels = self.all_gather(labels)
 
+        assert isinstance(all_scores, torch.Tensor)
+        assert isinstance(all_labels, torch.Tensor)
         if self.trainer.is_global_zero:
             full_scores = all_scores.reshape(-1)
             full_labels = all_labels.reshape(-1)
