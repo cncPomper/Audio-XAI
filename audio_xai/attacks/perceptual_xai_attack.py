@@ -122,11 +122,19 @@ def perceptual_xai_attack(
 
     history: list[dict] = []
 
+    # Efficient/Flash attention backends don't implement second-order gradients,
+    # which are required to backprop through Grad-CAM. Force the math backend.
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
     for step in range(cfg.n_steps):
         x_adv = x + delta
 
         # 1. Explanation loss: minimize cosine similarity to the original CAM.
-        cam_adv = gradcam(x_adv, target_class=pred_orig, create_graph=True)
+        # return_logits=True reuses the logits from the Grad-CAM forward pass,
+        # avoiding a second full model forward pass and halving peak GPU memory.
+        cam_adv, logits_adv = gradcam(x_adv, target_class=pred_orig, create_graph=True, return_logits=True)
         cam_adv_flat = _flatten_normalize(cam_adv)
         cos_sim = (cam_orig_flat * cam_adv_flat).sum(dim=1)
         loss_explain = cos_sim.mean()
@@ -136,7 +144,6 @@ def perceptual_xai_attack(
 
         # 3. Prediction-preserving hinge: penalize only when the wrong class
         #    is within ``pred_margin`` of the right class.
-        logits_adv = model(x_adv)
         correct = logits_adv.gather(1, pred_orig.view(-1, 1)).squeeze(1)
         # For binary, "other" is just 1 - pred; generalize with masking for n>2.
         mask = F.one_hot(pred_orig, num_classes=logits_adv.shape[1]).bool()

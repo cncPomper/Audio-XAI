@@ -75,8 +75,13 @@ class GradCAMBase(ABC):
         waveform: torch.Tensor,
         target_class: torch.Tensor | int | None = None,
         create_graph: bool = False,
-    ) -> torch.Tensor:
-        """Compute a Grad-CAM heatmap for each input waveform, returning shape [B, H, W]."""
+        return_logits: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Compute a Grad-CAM heatmap for each input waveform, returning shape [B, H, W].
+
+        If ``return_logits=True``, returns ``(heatmap, logits)`` so callers can
+        reuse the logits instead of running a second forward pass.
+        """
         self._activations = None
         self._gradients = None
 
@@ -99,7 +104,8 @@ class GradCAMBase(ABC):
             retain_graph=True,
         )[0]
 
-        return self._build_heatmap(self._activations, grads)
+        heatmap = self._build_heatmap(self._activations, grads)
+        return (heatmap, logits) if return_logits else heatmap
 
 
 class CNNGradCAM(GradCAMBase):
