@@ -1,14 +1,10 @@
 """Psychoacoustic masking threshold for adversarial attacks.
 
-Implements the simplified mask from Qin et al. 2019 ("Imperceptible,
-Robust, and Targeted Adversarial Examples for Automatic Speech Recognition").
-The full ISO 11172-3 (MPEG psychoacoustic model 1) involves tonal/non-tonal
-maskers, downsampling the masking grid, and several thresholding steps that
-are non-differentiable. This version keeps the core idea — louder frequency
-components mask quieter nearby ones — while staying gradient-friendly.
+Implements the simplified mask from Qin et al. 2019 ("Imperceptible, Robust, and Targeted Adversarial Examples for Automatic Speech Recognition"). The
+full ISO 11172-3 (MPEG psychoacoustic model 1) involves tonal/non-tonal maskers, downsampling the masking grid, and several thresholding steps that
+are non-differentiable. This version keeps the core idea — louder frequency components mask quieter nearby ones — while staying gradient-friendly.
 
-Used in the attack loop: any spectral perturbation energy *above* this
-threshold is audible and gets penalized; energy below it is, by the
+Used in the attack loop: any spectral perturbation energy *above* this threshold is audible and gets penalized; energy below it is, by the
 psychoacoustic model, inaudible and is free.
 """
 
@@ -18,12 +14,23 @@ import torch
 
 
 def hz_to_bark(freq_hz: torch.Tensor) -> torch.Tensor:
-    """Traunmüller 1990 Hz->Bark conversion."""
+    """Convert frequencies from hertz to the Bark scale using Traunmüller (1990).
+
+    Parameters:
+        freq_hz (torch.Tensor): Frequencies in hertz.
+
+    Returns:
+        torch.Tensor: Frequencies on the Bark scale, same shape as `freq_hz`.
+    """
     return 26.81 * freq_hz / (1960 + freq_hz) - 0.53
 
 
 def absolute_threshold_of_hearing(freq_hz: torch.Tensor) -> torch.Tensor:
-    """Terhardt's ATH model in dB SPL. Sets the floor for masking."""
+    """Compute the absolute threshold of hearing (ATH) in dB SPL for input frequencies using Terhardt's model.
+
+    Returns:
+        ath_db (torch.Tensor): ATH values in dB SPL, with the same shape as `freq_hz`.
+    """
     f_khz = freq_hz / 1000.0
     f_khz = torch.clamp(f_khz, min=0.02)  # avoid log singularity at 0
     ath = 3.64 * f_khz.pow(-0.8) - 6.5 * torch.exp(-0.6 * (f_khz - 3.3).pow(2)) + 1e-3 * f_khz.pow(4)
@@ -31,11 +38,15 @@ def absolute_threshold_of_hearing(freq_hz: torch.Tensor) -> torch.Tensor:
 
 
 def spreading_function(bark_diff: torch.Tensor) -> torch.Tensor:
-    """Schroeder's spreading function in dB.
+    """Compute Schroeder's spreading function (masking drop in decibels) as a function of Bark distance.
 
-    bark_diff: distance in Bark between masker and maskee. Output is the
-    drop in masking effect (dB) at that distance — i.e. how much weaker the
-    maskee can be while still being masked.
+    The result is the attenuation (in dB) that a masker produces at a maskee frequency separated by the given Bark distance.
+
+    Parameters:
+        bark_diff (torch.Tensor): Distance in Bark from masker to maskee.
+
+    Returns:
+        torch.Tensor: Masking drop in dB for each input Bark distance (same shape as `bark_diff`).
     """
     return 15.81 + 7.5 * (bark_diff + 0.474) - 17.5 * torch.sqrt(1 + (bark_diff + 0.474).pow(2))
 
@@ -47,19 +58,14 @@ def masking_threshold(
     hop_length: int = 128,
     db_offset: float = 90.0,
 ) -> torch.Tensor:
-    """Compute the per-frame masking threshold of a waveform.
+    """Computes the per-frame psychoacoustic masking threshold for a batch waveform.
 
-    Parameters
-    ----------
-    waveform : [B, T] tensor.
-    db_offset : SPL calibration. We don't know absolute playback level, so
-        we pick an offset that makes the threshold roughly correspond to a
-        normal listening level. 90 dB SPL is the standard MPEG choice.
+    Parameters:
+        waveform (torch.Tensor): Audio tensor shaped [B, T], where B is batch size and T is time samples.
+        db_offset (float): SPL calibration offset applied to STFT magnitudes so thresholds align with typical listening levels; 90 dB SPL is the standard MPEG choice.
 
-    Returns
-    -------
-    threshold_db : [B, n_freq, n_frames] — dB level above which spectral
-        energy at each (freq, time) bin becomes audible.
+    Returns:
+        threshold_db (torch.Tensor): Tensor shaped [B, n_freq, n_frames] containing the dB level above which spectral energy at each frequency/time bin is considered audible under the model.
     """
     device = waveform.device
     window = torch.hann_window(n_fft, device=device)
@@ -110,10 +116,18 @@ def perturbation_audibility_loss(
     hop_length: int = 128,
     db_offset: float = 90.0,
 ) -> torch.Tensor:
-    """Penalty for perturbation energy above the masking threshold.
+    """Compute the mean squared audible excess of a perturbation relative to a masking threshold.
 
-    Returns a scalar loss. Zero if the perturbation is fully masked (inaudible
-    by the psychoacoustic model), positive otherwise.
+    Parameters:
+        delta (torch.Tensor): Perturbation waveform, shape [B, T] (batch-first) or broadcastable to that shape; values are audio samples.
+        threshold_db (torch.Tensor): Masking threshold in dB SPL with shape [B, n_freq, n_frames] (or broadcastable to the STFT output); values are dB levels to compare against.
+        sample_rate (int): Sample rate used for STFT (informational; does not affect computation here).
+        n_fft (int): FFT size used to compute the STFT.
+        hop_length (int): Hop length (frame advance) used for the STFT.
+        db_offset (float): Calibration offset added to 20*log10(magnitude) to express magnitudes in dB SPL.
+
+    Returns:
+        torch.Tensor: Scalar loss equal to the mean of squared positive dB differences (delta_db - threshold_db). Returns `0.0` if the perturbation is at or below the threshold everywhere.
     """
     window = torch.hann_window(n_fft, device=delta.device)
     delta_spec = torch.stft(delta, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)

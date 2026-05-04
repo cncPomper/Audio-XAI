@@ -1,7 +1,4 @@
-"""
-preprocessing.py
-----------------
-Audio preprocessing utilities and perceptual metric computation.
+"""preprocessing.py ---------------- Audio preprocessing utilities and perceptual metric computation.
 
 Usage:
     python preprocessing.py
@@ -48,10 +45,9 @@ PESQ_CHUNK_SIZE = PESQ_SR * 8  # 8 s
 
 
 def load_audio(path: str):
-    """
-    Load mono audio at CDPAM_SR and return arrays/tensors for all metrics.
+    """Load mono audio at CDPAM_SR and return arrays/tensors for all metrics.
 
-    Returns
+    Returns:
     -------
     y_np         : np.ndarray [T]      at CDPAM_SR
     tensor_cdpam : Tensor [1, 1, T]
@@ -110,10 +106,20 @@ def distort_signal(
     gain_db: float = -2.0,
     lowpass_hz: float = 7000.0,
 ) -> torch.Tensor:
-    """
-    Apply additive noise + gain + low-pass distortion.
+    """Apply additive Gaussian noise, apply a gain in decibels, and apply a low-pass biquad filter to an input waveform.
 
-    Returns distorted mono [1, T] tensor clipped to [-1, 1].
+    Parameters:
+        ref_waveform (torch.Tensor): Input audio of shape [T] or [C, T]. If 2-D, channels are averaged to produce mono before processing.
+        sample_rate (int): Sample rate of the input waveform in Hz (used by the low-pass filter).
+        noise_std (float): Standard deviation of the additive Gaussian noise applied to the signal.
+        gain_db (float): Gain to apply in decibels before filtering (negative values attenuate).
+        lowpass_hz (float): Cutoff frequency for the low-pass biquad filter in Hz.
+
+    Returns:
+        torch.Tensor: Processed mono waveform of shape [1, T] with samples clipped to the range [-1.0, 1.0].
+
+    Raises:
+        ValueError: If `ref_waveform` does not have shape [T] or [C, T].
     """
     if ref_waveform.dim() == 1:
         ref = ref_waveform.unsqueeze(0)
@@ -142,7 +148,10 @@ def _iter_chunks(a, b, chunk_size: int):
 
 
 def compute_cdpam(metric, tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> float:
-    """CDPAM averaged over 0.5-s chunks. Expects tensors [1, 1, T]."""
+    """CDPAM averaged over 0.5-s chunks.
+
+    Expects tensors [1, 1, T].
+    """
     a = tensor_a.squeeze(1)  # [1, T]
     b = tensor_b.squeeze(1)
     scores = []
@@ -158,7 +167,10 @@ def compute_pesq(
     sr: int = PESQ_SR,
     mode: str = "wb",
 ) -> float:
-    """PESQ averaged over 8-s chunks. Expects 1-D tensors [T]."""
+    """PESQ averaged over 8-s chunks.
+
+    Expects 1-D tensors [T].
+    """
     pesq_fn = PerceptualEvaluationSpeechQuality(sr, mode)
     a = tensor_a.squeeze()
     b = tensor_b.squeeze()
@@ -175,7 +187,10 @@ def compute_stoi(
     sr: int = PESQ_SR,
     extended: bool = False,
 ) -> float:
-    """STOI averaged over 8-s chunks. Expects 1-D arrays at PESQ_SR."""
+    """STOI averaged over 8-s chunks.
+
+    Expects 1-D arrays at PESQ_SR.
+    """
     T = min(len(y_a), len(y_b))
     a, b = y_a[:T], y_b[:T]
     scores = []
@@ -213,7 +228,7 @@ def compute_snr(y_a: np.ndarray, y_b: np.ndarray) -> float:
 
 
 def compute_psnr(y_a: np.ndarray, y_b: np.ndarray) -> float:
-    """PSNR: Szczytowy stosunek sygnału do szumu"""
+    """PSNR: Szczytowy stosunek sygnału do szumu."""
     min_len = min(len(y_a), len(y_b))
     ref, gen = y_a[:min_len], y_b[:min_len]
 
@@ -226,7 +241,7 @@ def compute_psnr(y_a: np.ndarray, y_b: np.ndarray) -> float:
 
 
 def compute_lsd(y_a: np.ndarray, y_b: np.ndarray) -> float:
-    """LSD: Odległość Log-Spektralna między dwoma sygnałami"""
+    """LSD: Odległość Log-Spektralna między dwoma sygnałami."""
     # Zabezpieczenie przed nieskończonością przy logarytmie
     eps = 1e-8
 
@@ -245,7 +260,7 @@ def compute_lsd(y_a: np.ndarray, y_b: np.ndarray) -> float:
 
 
 def compute_dtw(y_a: np.ndarray, y_b: np.ndarray, sr: int = 22050) -> float:
-    """DTW: Dynamic Time Warping na cechach MFCC"""
+    """DTW: Dynamic Time Warping na cechach MFCC."""
     mfcc_a = librosa.feature.mfcc(y=y_a, sr=sr)
     mfcc_b = librosa.feature.mfcc(y=y_b, sr=sr)
 
@@ -254,7 +269,7 @@ def compute_dtw(y_a: np.ndarray, y_b: np.ndarray, sr: int = 22050) -> float:
 
 
 def compute_kl_divergence(y_a: np.ndarray, y_b: np.ndarray) -> float:
-    """KL Divergence między uśrednionymi widmami amplitudowymi"""
+    """KL Divergence między uśrednionymi widmami amplitudowymi."""
     eps = 1e-10
 
     S_ref = np.mean(np.abs(librosa.stft(y_a)), axis=1)

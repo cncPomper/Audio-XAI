@@ -1,7 +1,8 @@
 import os
 
 import soundfile as sf
-from datasets import Audio, Dataset as HFDataset, load_dataset
+from datasets import Audio, load_dataset
+from datasets import Dataset as HFDataset
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION

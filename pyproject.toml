@@ -100,17 +100,29 @@ audio_xai = "audio_xai.cli:app"
 # rules.TY015 = "warn"  # For invalid-argument-type, warn instead of error.
 
 [tool.ruff]
-line-length = 120
+line-length = 150
+
+[tool.ruff.format]
+# Enable reformatting of code snippets in docstrings.
+docstring-code-format = true
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "D",    # pydocstyle (highly recommended for docstring consistency)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore docstring requirements in all test files
+"tests/**/*.py" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google" # or "numpy" / "pep257"
 
 [tool.coverage.run]
 branch = true

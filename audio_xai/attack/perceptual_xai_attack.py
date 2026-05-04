@@ -18,7 +18,7 @@ attacks but are unstable when the loss includes second-order gradients (we
 backprop through Grad-CAM, which itself contains a gradient). Adam is the
 right tool here.
 
-References
+References:
 ----------
 - Ghorbani et al. 2019, "Interpretation of Neural Networks is Fragile"
 - Heo et al. 2019, "Fooling Neural Network Interpretations via Adversarial Model Manipulation"
@@ -66,7 +66,14 @@ class AttackResult:
 
 
 def _flatten_normalize(cam: torch.Tensor) -> torch.Tensor:
-    """Flatten heatmap and L2-normalize; for cosine similarity."""
+    """Flatten a batch of heatmaps and L2-normalize each sample along the feature dimension.
+
+    Parameters:
+        cam (torch.Tensor): Batch of heatmaps with shape [B, ...] (B = batch size).
+
+    Returns:
+        torch.Tensor: Tensor of shape [B, N] where each row is the L2-normalized flattened heatmap (`eps=1e-8` used for numerical stability).
+    """
     flat = cam.flatten(start_dim=1)
     return F.normalize(flat, p=2, dim=1, eps=1e-8)
 
@@ -77,17 +84,23 @@ def perceptual_xai_attack(
     cfg: AttackConfig | None = None,
     gradcam: GradCAMBase | None = None,
 ) -> AttackResult:
-    """Run the perceptual XAI attack on a batch of waveforms.
+    """Run the perceptual XAI adversarial attack on a batch of waveforms.
 
-    Parameters
-    ----------
-    model : trained AudioClassifier in eval mode (we don't put it in eval
-        mode here — caller's responsibility, since dropout/BN choices affect
-        what "the model" means for the attack).
-    x : [B, T] waveform tensor on the same device as the model.
-    cfg : attack hyperparameters.
-    gradcam : optional pre-built Grad-CAM. If None, picks the variant matching
-        the model. Pass your own if you want a non-default target layer.
+    Parameters:
+        model (AudioClassifier): The trained audio classifier (caller should set model to the desired mode; evaluation mode is recommended because dropout/BN affect behaviour).
+        x (torch.Tensor): Input waveforms of shape [B, T] on the same device as the model.
+        cfg (AttackConfig | None): Attack hyperparameters; defaults to AttackConfig() when None.
+        gradcam (GradCAMBase | None): Optional pre-built Grad-CAM instance; if None a suitable Grad-CAM for the model is created.
+
+    Returns:
+        AttackResult: Container with fields:
+            - x_adv: adversarial waveform tensor [B, T].
+            - delta: final perturbation tensor added to x.
+            - cam_original: Grad-CAM heatmap for the original inputs.
+            - cam_adv: Grad-CAM heatmap for the adversarial inputs.
+            - cosine_similarity: per-sample cosine similarity between original and adversarial CAMs.
+            - prediction_preserved: boolean tensor indicating whether each sample's predicted class was preserved.
+            - history: list of per-step logged loss dictionaries.
     """
     cfg = cfg or AttackConfig()
     if gradcam is None:
@@ -182,9 +195,12 @@ def perceptual_xai_attack(
 
 
 def topk_overlap(cam_a: torch.Tensor, cam_b: torch.Tensor, k_frac: float = 0.1) -> torch.Tensor:
-    """Jaccard overlap of top-k% pixels between two heatmaps.
+    """Compute the per-sample Jaccard (intersection-over-union) overlap between the top-k fraction of pixels in two heatmaps.
 
-    Range [0, 1]. Lower = more disagreement = more successful attack.
+    k is determined as max(1, int(k_frac * N_pixels)); overlap values lie in [0.0, 1.0].
+
+    Returns:
+        overlaps (torch.Tensor): 1-D tensor of length B containing the Jaccard overlap for each sample; each value is intersection_size / union_size (0.0 if union is 0).
     """
     B = cam_a.shape[0]
     flat_a = cam_a.flatten(start_dim=1)
@@ -206,10 +222,19 @@ def topk_overlap(cam_a: torch.Tensor, cam_b: torch.Tensor, k_frac: float = 0.1) 
 
 
 def heatmap_ssim(cam_a: torch.Tensor, cam_b: torch.Tensor) -> torch.Tensor:
-    """Simple per-sample SSIM between two heatmaps. Lower = more change.
+    """Compute a lightweight per-sample SSIM-like similarity between two heatmaps.
 
-    Minimal implementation — for publication-grade SSIM use ``torchmetrics``
-    or ``pytorch-msssim``.
+    Flattens each heatmap per batch item and computes per-sample means, variances,
+    and covariance to form a simplified SSIM score. This is a minimal approximation
+    for comparing explanation heatmaps; it is not a publication-grade SSIM.
+
+    Parameters:
+        cam_a (torch.Tensor): First batch of heatmaps with shape [B, ...].
+        cam_b (torch.Tensor): Second batch of heatmaps with shape [B, ...].
+
+    Returns:
+        ssim (torch.Tensor): Per-sample similarity scores with shape [B]; lower
+        values indicate greater change between corresponding heatmaps.
     """
     a = cam_a.flatten(start_dim=1)
     b = cam_b.flatten(start_dim=1)

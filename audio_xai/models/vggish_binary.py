@@ -1,11 +1,9 @@
 """VGGish wrapper for binary real/fake classification.
 
-VGGish is the CNN baseline. We use torchvggish-style architecture loaded from
-torch.hub. Grad-CAM was designed for exactly this kind of model — the last
-conv block gives clean, localized attribution maps over the spectrogram.
+VGGish is the CNN baseline. We use torchvggish-style architecture loaded from torch.hub. Grad-CAM was designed for exactly this kind of model — the
+last conv block gives clean, localized attribution maps over the spectrogram.
 
-Note: VGGish operates on 96-frame log-mel patches at 16 kHz (~0.96 s each).
-For long clips you average logits over patches.
+Note: VGGish operates on 96-frame log-mel patches at 16 kHz (~0.96 s each). For long clips you average logits over patches.
 """
 
 from __future__ import annotations
@@ -26,11 +24,19 @@ VGGISH_FRAMES_PER_PATCH = 96  # ~0.96 s
 class _VGGishBackbone(nn.Module):
     """Minimal VGGish feature extractor (4 conv blocks).
 
-    Faithful to the original architecture. If you want pretrained weights,
-    load the harritaylor/torchvggish checkpoint and copy state_dict here.
+    Faithful to the original architecture. If you want pretrained weights, load the harritaylor/torchvggish checkpoint and copy state_dict here.
     """
 
     def __init__(self):
+        """Constructs the VGGish-like convolutional feature extractor and its 128‑dimensional embedding head.
+
+        Initializes two modules on the instance:
+        - self.features: a sequential convolutional backbone (Conv2d/ReLU/MaxPool blocks) that maps a single-channel spectrogram patch to a deep feature map with 512 channels.
+        - self.embedding: a sequential head that flattens the backbone output and projects it through fully connected layers to a 128-dimensional embedding.
+
+        Notes:
+        - The embedding linear layer sizes assume the backbone output spatial resolution is 6 × 4 (e.g., an input patch that yields 96 time frames and 64 mel bins after four pooling operations).
+        """
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(1, 64, 3, padding=1),
@@ -62,12 +68,30 @@ class _VGGishBackbone(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute a 128-dimensional embedding from a single spectrogram patch.
+
+        Parameters:
+            x (torch.Tensor): Input spectrogram patch tensor with shape [B, 1, n_mels, F], where B is batch size,
+                n_mels is number of mel bins (64) and F is frames per patch (96).
+
+        Returns:
+            torch.Tensor: Embedding tensor with shape [B, 128].
+        """
         feats = self.features(x)
         return self.embedding(feats)
 
 
 class VGGishBinary(AudioClassifier):
     def __init__(self):
+        """Initialize the VGGishBinary audio classifier by creating the feature backbone, classification head, and fixed mel-spectrogram
+        preprocessing.
+
+        Initializes:
+        - a minimal VGGish-like backbone that produces 128-D embeddings,
+        - a linear classification head mapping embeddings to 2 logits (real/fake),
+        - a MelSpectrogram frontend configured for 16 kHz audio, 64 mel bins, FFT=400, hop=160, and frequency range 125–7500 Hz,
+        - an AmplitudeToDB transform for power-to-decibel normalization with a 80 dB top limit.
+        """
         super().__init__()
         self.backbone = _VGGishBackbone()
         self.head = nn.Linear(128, 2)
@@ -85,6 +109,14 @@ class VGGishBinary(AudioClassifier):
 
     def waveform_to_features(self, waveform: torch.Tensor) -> torch.Tensor:
         # waveform: [B, T]
+        """Convert a batch of raw waveforms into log-mel spectrogram patches sized for the VGGish backbone.
+
+        Parameters:
+            waveform (torch.Tensor): Waveforms with shape [B, T], sampled at VGGISH_SAMPLE_RATE. Each batch element is converted to a mel spectrogram and normalized to decibels.
+
+        Returns:
+            torch.Tensor: Tensor of log-mel spectrogram patches with shape [B, 1, VGGISH_N_MELS, VGGISH_FRAMES_PER_PATCH]. Spectrograms are padded or truncated on the time axis so each patch has exactly VGGISH_FRAMES_PER_PATCH frames.
+        """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)
         # Take the first 96-frame window for simplicity; for production,
@@ -97,10 +129,23 @@ class VGGishBinary(AudioClassifier):
         return spec.unsqueeze(1)
 
     def features_to_logits(self, features: torch.Tensor) -> torch.Tensor:
+        """Convert a batch of spectrogram patch tensors into 2-class logits using the backbone embedding and linear head.
+
+        Parameters:
+                features (torch.Tensor): Spectrogram patches shaped [B, 1, n_mels, F], where F is the frames-per-patch (typically 96).
+
+        Returns:
+                logits (torch.Tensor): Unnormalized class scores with shape [B, 2].
+        """
         emb = self.backbone(features)
         return self.head(emb)
 
     @property
     def target_layer(self) -> nn.Module:
         # Last conv layer — canonical Grad-CAM target.
+        """Get the backbone's final convolutional layer used as the canonical Grad-CAM target.
+
+        Returns:
+            nn.Module: The last convolutional convolutional layer from `self.backbone.features`, intended for Grad-CAM attribution.
+        """
         return self.backbone.features[-3]

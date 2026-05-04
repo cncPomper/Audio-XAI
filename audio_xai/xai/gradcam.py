@@ -28,8 +28,7 @@ from audio_xai.models.base import AudioClassifier
 class GradCAMBase(ABC):
     """Common Grad-CAM scaffolding.
 
-    Subclasses define how to turn the (activations, gradients) pair from the
-    target layer into a 2-D heatmap. The forward/backward bookkeeping is
+    Subclasses define how to turn the (activations, gradients) pair from the target layer into a 2-D heatmap. The forward/backward bookkeeping is
     shared.
     """
 
@@ -67,7 +66,9 @@ class GradCAMBase(ABC):
         self.remove_hooks()
 
     @abstractmethod
-    def _build_heatmap(self, activations: torch.Tensor, gradients: torch.Tensor) -> torch.Tensor: ...
+    def _build_heatmap(self, activations: torch.Tensor, gradients: torch.Tensor) -> torch.Tensor:
+        """Build a [B, H, W] heatmap from layer activations and their gradients."""
+        ...
 
     def __call__(
         self,
@@ -75,20 +76,7 @@ class GradCAMBase(ABC):
         target_class: torch.Tensor | int | None = None,
         create_graph: bool = False,
     ) -> torch.Tensor:
-        """Compute Grad-CAM for the given waveform.
-
-        Parameters
-        ----------
-        waveform : [B, T] tensor.
-        target_class : class index to explain. If None, uses argmax.
-        create_graph : if True, the returned heatmap is differentiable w.r.t.
-            ``waveform``. Required when the heatmap is used as part of a loss
-            you backprop through (the attack loop).
-
-        Returns
-        -------
-        Tensor [B, H, W] — heatmap per sample.
-        """
+        """Compute a Grad-CAM heatmap for each input waveform, returning shape [B, H, W]."""
         self._activations = None
         self._gradients = None
 
@@ -127,10 +115,8 @@ class CNNGradCAM(GradCAMBase):
 class TransformerGradCAM(GradCAMBase):
     """Grad-CAM for transformer activations [B, N_tokens, D].
 
-    AST tokenizes the spectrogram into (freq_patches × time_patches) patches,
-    plus a CLS token (and on AudioSet checkpoints, a distillation token too).
-    We drop the special tokens, reshape to a 2-D grid, and treat the embedding
-    dim as the "channel" dim for Grad-CAM weighting.
+    AST tokenizes the spectrogram into (freq_patches × time_patches) patches, plus a CLS token (and on AudioSet checkpoints, a distillation token
+    too). We drop the special tokens, reshape to a 2-D grid, and treat the embedding dim as the "channel" dim for Grad-CAM weighting.
     """
 
     def __init__(
@@ -172,7 +158,7 @@ class TransformerGradCAM(GradCAMBase):
 
 
 def make_gradcam(model: AudioClassifier) -> GradCAMBase:
-    """Return the right Grad-CAM variant for the given model."""
+    """Select the appropriate Grad-CAM variant for the given model."""
     cls_name = type(model).__name__
     if cls_name == "VGGishBinary":
         return CNNGradCAM(model)

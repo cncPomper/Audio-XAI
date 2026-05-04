@@ -1,9 +1,8 @@
 """Audio Spectrogram Transformer wrapper for binary real/fake classification.
 
-We deliberately do NOT use ``ASTFeatureExtractor`` at training/attack time
-because it operates on numpy and breaks gradient flow. Instead we replicate
-its log-mel + normalization step in pure torch ops. The HF extractor is fine
-for one-off inference but useless inside an adversarial optimization loop.
+We deliberately do NOT use ``ASTFeatureExtractor`` at training/attack time because it operates on numpy and breaks gradient flow. Instead we replicate
+its log-mel + normalization step in pure torch ops. The HF extractor is fine for one-off inference but useless inside an adversarial optimization
+loop.
 """
 
 from __future__ import annotations
@@ -28,6 +27,15 @@ AST_STD = 4.5689974
 
 class ASTBinary(AudioClassifier):
     def __init__(self, pretrained: bool = True):
+        """Constructs an ASTBinary instance with an AST backbone and Torch-based differentiable audio preprocessing.
+
+        When `pretrained=True`, loads the Hugging Face AST checkpoint configured for 2 labels (allowing mismatched sizes).
+        When `pretrained=False`, instantiates a fresh AST model configuration for 2 labels. Also sets up differentiable, device-local preprocessing modules:
+        - a MelSpectrogram configured with the module-level AST constants (sample rate, n_fft, hop_length, n_mels, f_min=0, f_max=sample_rate/2, power=2.0) and an AmplitudeToDB transform (stype="power", top_db=80) for log-mel conversion.
+
+        Parameters:
+            pretrained (bool): If true, load pretrained AST weights; otherwise initialize a new AST model.
+        """
         super().__init__()
 
         if pretrained:
@@ -54,6 +62,14 @@ class ASTBinary(AudioClassifier):
 
     def waveform_to_features(self, waveform: torch.Tensor) -> torch.Tensor:
         # waveform: [B, T] in [-1, 1]
+        """Convert a batch of waveforms into AST-compatible, normalized log-mel feature frames.
+
+        Parameters:
+            waveform (torch.Tensor): Batch of audio waveforms with shape [B, T]; samples expected in the range [-1, 1].
+
+        Returns:
+            torch.Tensor: Log-mel features shaped [B, AST_TARGET_FRAMES, AST_N_MELS], normalized using AST_MEAN and AST_STD. The time axis is padded or trimmed to exactly AST_TARGET_FRAMES.
+        """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)  # log-mel
         spec = (spec - AST_MEAN) / (AST_STD * 2)
@@ -70,6 +86,14 @@ class ASTBinary(AudioClassifier):
 
     def features_to_logits(self, features: torch.Tensor) -> torch.Tensor:
         # AST forward signature is (input_values=...). It returns a SequenceClassifierOutput.
+        """Convert precomputed AST features into class logits.
+
+        Parameters:
+            features (torch.Tensor): Input features with shape [B, frames, n_mels], matching the AST backbone's expected layout and dtype.
+
+        Returns:
+            torch.Tensor: Raw, unnormalized logits of shape [B, 2], where each row contains scores for the two binary classes.
+        """
         return self.backbone(input_values=features).logits
 
     @property

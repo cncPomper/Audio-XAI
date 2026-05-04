@@ -25,6 +25,17 @@ from audio_xai.models.vggish_binary import VGGishBinary
 
 
 def build_model(name: str):
+    """Select and construct an audio classifier model implementation by name.
+
+    Parameters:
+        name (str): Model identifier; use "ast" to construct an `ASTBinary` with pretrained weights, or "vggish" to construct a `VGGishBinary`.
+
+    Returns:
+        model: An instance of the selected model class (`ASTBinary` or `VGGishBinary`).
+
+    Raises:
+        ValueError: If `name` is not one of "ast" or "vggish".
+    """
     if name == "ast":
         return ASTBinary(pretrained=True)
     if name == "vggish":
@@ -33,6 +44,13 @@ def build_model(name: str):
 
 
 def main():
+    """Train a binary audio classifier using a PyTorch Lightning training loop configured via command-line arguments.
+
+    Parses CLI options (data root, model choice, training hyperparameters, and runtime settings), seeds randomness, constructs a SonicsConfig and
+    SonicsDataset, splits the dataset into training and validation sets according to the validation fraction, and builds DataLoaders. It selects and
+    wraps the chosen model in the RealFakeLitModule, configures TensorBoard logging and a ModelCheckpoint that monitors "val/eer", and runs
+    Trainer.fit with mixed-precision and automatic accelerator/device selection.
+    """
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--model", choices=["ast", "vggish"], default="ast")
