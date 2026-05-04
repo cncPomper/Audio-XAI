@@ -1,3 +1,5 @@
+"""Feature extraction CLI command."""
+
 from pathlib import Path
 
 import typer
@@ -16,6 +18,7 @@ def main(
     output_path: Path = PROCESSED_DATA_DIR / "features.csv",
     # -----------------------------------------
 ):
+    """Generate features from the processed dataset and write them to the output path."""
     # ---- REPLACE THIS WITH YOUR OWN CODE ----
     logger.info("Generating features from dataset...")
     for i in tqdm(range(10), total=10):

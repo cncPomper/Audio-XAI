@@ -1,3 +1,5 @@
+"""Distribution-level audio quality metrics: KAD and Inception Score."""
+
 import os
 
 import librosa

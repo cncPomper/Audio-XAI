@@ -42,6 +42,19 @@ from audio_xai.xai.gradcam import GradCAMBase, make_gradcam
 
 @dataclass
 class AttackConfig:
+    """Hyperparameters controlling the perceptual XAI attack optimization loop.
+
+    Attributes:
+        n_steps: Number of Adam optimizer iterations.
+        lr: Adam learning rate for the perturbation delta.
+        lambda_audibility: Weight for the psychoacoustic audibility loss term.
+        lambda_pred: Weight for the prediction-preservation hinge loss term.
+        pred_margin: Hinge margin; penalty activates when the non-target logit is within this value of the target logit.
+        linf_bound: Hard L-infinity clamp applied to delta after each step (waveform amplitude units).
+        sample_rate: Audio sample rate in Hz; used by the psychoacoustic masking model.
+        log_every: Log loss values every this many steps; set to ``None`` to disable logging.
+    """
+
     n_steps: int = 200
     lr: float = 1e-3
     lambda_audibility: float = 1.0
@@ -56,6 +69,18 @@ class AttackConfig:
 
 @dataclass
 class AttackResult:
+    """Output container returned by :func:`perceptual_xai_attack`.
+
+    Attributes:
+        x_adv: Adversarial waveform with shape [B, T] (original input plus optimized delta).
+        delta: Final perturbation tensor with shape [B, T] added to the original input.
+        cam_original: Grad-CAM heatmap computed on the original, unperturbed inputs.
+        cam_adv: Grad-CAM heatmap computed on the adversarial inputs after optimization.
+        cosine_similarity: Per-sample cosine similarity between original and adversarial CAMs; values closer to 0 or -1 indicate a more successful attack.
+        prediction_preserved: Boolean tensor of shape [B] indicating whether each sample's predicted class was unchanged by the perturbation.
+        history: List of per-step dictionaries with logged loss values (populated every ``cfg.log_every`` steps).
+    """
+
     x_adv: torch.Tensor  # perturbed waveform [B, T]
     delta: torch.Tensor  # perturbation [B, T]
     cam_original: torch.Tensor  # heatmap on x

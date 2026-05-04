@@ -1,3 +1,5 @@
+"""Dataset preprocessing CLI command."""
+
 from pathlib import Path
 
 import typer
@@ -16,6 +18,7 @@ def main(
     output_path: Path = PROCESSED_DATA_DIR / "dataset.csv",
     # ----------------------------------------------
 ):
+    """Process the raw dataset and write results to the output path."""
     # ---- REPLACE THIS WITH YOUR OWN CODE ----
     logger.info("Processing dataset...")
     for i in tqdm(range(10), total=10):

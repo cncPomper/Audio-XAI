@@ -1,3 +1,5 @@
+"""Project-wide path constants and environment configuration."""
+
 import os
 from pathlib import Path
 

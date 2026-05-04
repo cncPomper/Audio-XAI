@@ -1,3 +1,5 @@
+"""Utility helpers: YouTube audio download and project path status."""
+
 from __future__ import annotations
 
 import argparse
@@ -86,6 +88,11 @@ def download_audio(filename: str, yt_id: str) -> Path | None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the YouTube audio download helper.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``yt_id`` and ``output`` attributes.
+    """
     parser = argparse.ArgumentParser(description="Download YouTube audio via yt-dlp.")
     parser.add_argument("--yt-id", required=True, help="YouTube video ID, e.g. dQw4w9WgXcQ")
     parser.add_argument(
@@ -97,6 +104,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Download YouTube audio from the ID and output path provided on the command line.
+
+    Returns:
+        int: Exit code — 0 on success, 1 on download failure.
+    """
     args = parse_args()
     out_base = Path(args.output)
     out_base.parent.mkdir(parents=True, exist_ok=True)

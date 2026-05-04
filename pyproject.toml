@@ -118,8 +118,16 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Ignore docstring requirements in all test files
+# Ignore docstring requirements in test files and script-like directories
 "tests/**/*.py" = ["D"]
+# fetching_and_metrics/ contains standalone data-collection scripts with mixed-language comments
+"audio_xai/fetching_and_metrics/**/*.py" = ["D"]
+# modeling/ contains boilerplate placeholder commands
+"audio_xai/modeling/**/*.py" = ["D"]
+# plots.py is a boilerplate placeholder command
+"audio_xai/plots.py" = ["D"]
+# scripts/ contains standalone training/utility entry points
+"scripts/**/*.py" = ["D"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google" # or "numpy" / "pep257"

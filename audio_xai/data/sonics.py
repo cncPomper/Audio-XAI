@@ -12,6 +12,17 @@ from torch.utils.data import Dataset
 
 @dataclass
 class SonicsConfig:
+    """Configuration for the SONICS binary audio dataset.
+
+    Attributes:
+        root: Root directory containing the ``real`` and ``fake`` subdirectories.
+        clip_seconds: Target clip duration in seconds; longer clips are truncated and shorter ones are zero-padded.
+        sample_rate: Output sample rate in Hz; audio is resampled when the file rate differs.
+        real_subdir: Name of the subdirectory holding real audio files.
+        fake_subdir: Name of the subdirectory holding fake/generated audio files.
+        extensions: Tuple of file extensions to include when scanning for audio files.
+    """
+
     root: Path
     clip_seconds: float = 10.0
     sample_rate: int = 16_000
@@ -31,6 +42,16 @@ class SonicsDataset(Dataset):
     """
 
     def __init__(self, cfg: SonicsConfig) -> None:
+        """Scan the dataset root and build an internal list of (path, label) pairs.
+
+        Args:
+            cfg: Dataset configuration specifying the root directory, sample rate,
+                clip duration, subdirectory names, and supported file extensions.
+
+        Raises:
+            FileNotFoundError: If either the real or fake subdirectory does not exist.
+            RuntimeError: If no audio files matching the configured extensions are found.
+        """
         self.cfg = cfg
         self._samples: list[tuple[Path, int]] = []
 
@@ -46,9 +67,23 @@ class SonicsDataset(Dataset):
             raise RuntimeError(f"No audio files found under {cfg.root}")
 
     def __len__(self) -> int:
+        """Return the total number of audio samples in the dataset."""
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        """Load, preprocess, and return the audio sample at the given index.
+
+        Multi-channel audio is converted to mono by averaging channels. The
+        waveform is resampled to ``cfg.sample_rate`` when necessary and then
+        padded with zeros or truncated to exactly ``cfg.clip_seconds`` in length.
+
+        Args:
+            idx: Integer index into the dataset.
+
+        Returns:
+            A tuple ``(waveform, label)`` where ``waveform`` is a 1-D float
+            tensor of shape ``[T]`` and ``label`` is 0 for real or 1 for fake.
+        """
         path, label = self._samples[idx]
         waveform, sr = torchaudio.load(str(path))
 
