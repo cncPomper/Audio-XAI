@@ -296,6 +296,7 @@ dependencies = [
     { name = "ipython" },
     { name = "jupyterlab" },
     { name = "librosa" },
+    { name = "lightning" },
     { name = "loguru" },
     { name = "matplotlib" },
     { name = "mkdocs" },
@@ -310,7 +311,6 @@ dependencies = [
     { name = "pystoi" },
     { name = "pytest" },
     { name = "python-dotenv" },
-    { name = "pytorch-lightning" },
     { name = "resampy" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -359,6 +359,7 @@ requires-dist = [
     { name = "ipython" },
     { name = "jupyterlab" },
     { name = "librosa" },
+    { name = "lightning" },
     { name = "loguru" },
     { name = "matplotlib" },
     { name = "mkdocs" },
@@ -372,7 +373,6 @@ requires-dist = [
     { name = "pystoi" },
     { name = "pytest" },
     { name = "python-dotenv" },
-    { name = "pytorch-lightning" },
     { name = "resampy" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -2018,6 +2018,26 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/64/36/360b5aafa0238e29758729e9486c6ed92a6f37fa403b7875e06c115cdf4a/librosa-0.11.0.tar.gz", hash = "sha256:f5ed951ca189b375bbe2e33b2abd7e040ceeee302b9bbaeeffdfddb8d0ace908", size = 327001, upload-time = "2025-03-11T15:09:54.884Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/ba/c63c5786dfee4c3417094c4b00966e61e4a63efecee22cb7b4c0387dda83/librosa-0.11.0-py3-none-any.whl", hash = "sha256:0b6415c4fd68bff4c29288abe67c6d80b587e0e1e2cfb0aad23e4559504a7fa1", size = 260749, upload-time = "2025-03-11T15:09:52.982Z" },
+]
+
+[[package]]
+name = "lightning"
+version = "2.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec", extra = ["http"] },
+    { name = "lightning-utilities" },
+    { name = "packaging" },
+    { name = "pytorch-lightning" },
+    { name = "pyyaml" },
+    { name = "torch" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/15/ad/a1c91a795521be252209d45fb080f28a4f1e7244d3b37121fcc6e3e43034/lightning-2.6.1.tar.gz", hash = "sha256:859104b98c61add6fe60d0c623abf749baf25f2950a66ebdfb4bd18aa7decba9", size = 663175, upload-time = "2026-01-30T14:59:13.92Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/6d/42640e15a8c34b57dc7ea922152440c0c6692214a08d5282b6e3eb46ddf4/lightning-2.6.1-py3-none-any.whl", hash = "sha256:30e1adac23004c713663928541bd72ecb1371b7abc9aff9f46b7fd2644988d30", size = 853631, upload-time = "2026-01-30T14:59:11.687Z" },
 ]
 
 [[package]]
