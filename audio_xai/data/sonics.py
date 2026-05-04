@@ -48,8 +48,8 @@ class SonicsDataset(Dataset):
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
-        path, label = self._samples[idx]
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        path, label = self._samples[index]
         waveform, sr = torchaudio.load(str(path))
 
         if waveform.shape[0] > 1:
