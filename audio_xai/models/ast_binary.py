@@ -44,6 +44,7 @@ class ASTBinary(AudioClassifier):
             )
         else:
             cfg = ASTConfig()  # type: ignore[call-arg, unknown-argument]
+            cfg.num_labels = 2
             self.backbone = ASTForAudioClassification(cfg)
 
         # Differentiable mel spectrogram. kept on the same device as the model.
