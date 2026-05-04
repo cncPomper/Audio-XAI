@@ -122,17 +122,33 @@ class RealFakeLitModule(LightningModule):
         self.log("val/auroc", self.val_auroc, prog_bar=True, on_epoch=True)
 
     def on_validation_epoch_end(self):
-        """Compute and log the validation Equal Error Rate (EER) from accumulated batch outputs and clear the stored buffers.
-
-        If validation scores and labels have been collected during the epoch, concatenates them, computes EER via equal_error_rate(scores, labels),
-        logs the value under "val/eer" (shown in the progress bar), and then clears the internal buffers used to accumulate scores and labels.
-        """
-        if self._val_scores:
-            scores = torch.cat(self._val_scores)
-            labels = torch.cat(self._val_labels)
-            self.log("val/eer", equal_error_rate(scores, labels), prog_bar=True)
+        """Compute and log the validation EER gathered across all ranks."""
+        if not self._val_scores:
             self._val_scores.clear()
             self._val_labels.clear()
+            return
+
+        scores = torch.cat(self._val_scores)  # [N_local]
+        labels = torch.cat(self._val_labels)  # [N_local]
+        self._val_scores.clear()
+        self._val_labels.clear()
+
+        # all_gather is a collective — every rank must call it, never gate with is_global_zero.
+        # Returns [world_size, N_local] under DDP, or [N_local] on a single device.
+        all_scores = self.all_gather(scores)
+        all_labels = self.all_gather(labels)
+
+        assert isinstance(all_scores, torch.Tensor)
+        assert isinstance(all_labels, torch.Tensor)
+        if self.trainer.is_global_zero:
+            full_scores = all_scores.reshape(-1)
+            full_labels = all_labels.reshape(-1)
+            self.log(
+                "val/eer",
+                equal_error_rate(full_scores, full_labels),
+                prog_bar=True,
+                rank_zero_only=True,
+            )
 
     def configure_optimizers(self):
         """Create an AdamW optimizer configured for this module's parameters.
