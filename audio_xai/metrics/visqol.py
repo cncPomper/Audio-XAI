@@ -15,10 +15,7 @@ class ViSQOL:
         self.d = -75.3
 
     def _level_align(self, x, y):
-        """
-        Wyrównuje poziom mocy sygnału zniekształconego (y)
-        do sygnału referencyjnego (x)[cite: 267].
-        """
+        """Wyrównuje poziom mocy sygnału zniekształconego (y) do sygnału referencyjnego (x)[cite: 267]."""
         power_x = np.sum(x**2)
         power_y = np.sum(y**2)
         if power_y == 0:
@@ -26,8 +23,8 @@ class ViSQOL:
         return y * np.sqrt(power_x / power_y)
 
     def _get_spectrogram(self, signal):
-        """
-        Tworzy spektrogram za pomocą STFT (Short-Term Fourier Transform) [cite: 268-270].
+        """Tworzy spektrogram za pomocą STFT (Short-Term Fourier Transform) [cite: 268-270].
+
         Używa okna Hamminga 512 próbek z 50% nałożeniem dla 16 kHz[cite: 270].
         """
         n_fft = 512 if self.sr == 16000 else 256
@@ -43,15 +40,11 @@ class ViSQOL:
         return spectrogram
 
     def _voice_activity_detection(self, r_patch, threshold=0.01):
-        """
-        Prosty detektor aktywności głosu (VAD) oparty na progowaniu energii[cite: 275].
-        """
+        """Prosty detektor aktywności głosu (VAD) oparty na progowaniu energii[cite: 275]."""
         return np.mean(r_patch) > threshold
 
     def _calculate_nsim(self, r_patch, d_patch, L):
-        """
-        Neurogram Similarity Index Measure (NSIM) [cite: 430-434].
-        """
+        """Neurogram Similarity Index Measure (NSIM) [cite: 430-434]."""
         # Zabezpieczenia matematyczne na brzegach [cite: 434]
         C1 = 0.01 * L
         C3 = (0.03 * L) ** 2
@@ -71,25 +64,20 @@ class ViSQOL:
         return term1 * term2
 
     def _warp_patch(self, patch, warp_factor):
-        """
-        Wykonywanie dwuwymiarowej interpolacji sześciennej w celu odkształcenia w czasie[cite: 360].
+        """Wykonywanie dwuwymiarowej interpolacji sześciennej w celu odkształcenia w czasie[cite: 360].
+
         Współczynniki to 0.95 (krótszy), 1.0 (bez zmian) i 1.05 (dłuższy)[cite: 284].
         """
         # Zmiana wymiaru czasowego przy zachowaniu wymiaru częstotliwościowego
         return zoom(patch, (1.0, warp_factor), order=3)
 
     def _map_to_mos(self, Q):
-        """
-        Mapowanie uśrednionego wyniku NSIM na skalę MOS (1-5)
-        przy użyciu dopasowania wielomianowego [cite: 438, 441-445].
-        """
+        """Mapowanie uśrednionego wyniku NSIM na skalę MOS (1-5) przy użyciu dopasowania wielomianowego [cite: 438, 441-445]."""
         mos = self.a * (Q**3) + self.b * (Q**2) + self.c * Q + self.d
         return np.clip(mos, 1.0, 5.0)
 
     def evaluate(self, ref_signal, deg_signal):
-        """
-        Główna funkcja oceniająca jakość mowy.
-        """
+        """Główna funkcja oceniająca jakość mowy."""
         # 1. Wyrównanie poziomu mocy [cite: 242, 267]
         deg_signal = self._level_align(ref_signal, deg_signal)
 

@@ -1,7 +1,8 @@
 import os
+import re
+
 import pandas as pd
 import yt_dlp
-import re
 
 # --- KONFIGURACJA ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,13 +18,9 @@ df_fake = pd.read_csv("fake_songs.csv", low_memory=False)
 df_real = pd.read_csv("real_songs.csv", low_memory=False)
 
 # Pobieramy nazwy plików audio z naszego wypakowanego folderu
-wypakowane_pliki = [
-    f for f in os.listdir(FOLDER_Z_FAKE) if f.endswith((".wav", ".mp3", ".flac"))
-][:ILOSC_PROBEK]
+wypakowane_pliki = [f for f in os.listdir(FOLDER_Z_FAKE) if f.endswith((".wav", ".mp3", ".flac"))][:ILOSC_PROBEK]
 
-print(
-    f"Znaleziono {len(wypakowane_pliki)} plików fake. Szukam odpowiedników na YT...\n"
-)
+print(f"Znaleziono {len(wypakowane_pliki)} plików fake. Szukam odpowiedników na YT...\n")
 
 for plik in wypakowane_pliki:
     print(f"\n--- Przetwarzam fałszywy plik: {plik} ---")
@@ -42,9 +39,7 @@ for plik in wypakowane_pliki:
 
     # 2. Szukamy tej nazwy w prawdziwych piosenkach
     # Zakładam, że w df_real kolumna nazywa się 'filename'
-    wiersz_real = df_real[
-        df_real["filename"].astype(str).str.contains(nazwa_real, na=False)
-    ]
+    wiersz_real = df_real[df_real["filename"].astype(str).str.contains(nazwa_real, na=False)]
 
     if wiersz_real.empty:
         print(f" -> UWAGA: Brak wpisu dla {nazwa_real} w real_songs.csv")
