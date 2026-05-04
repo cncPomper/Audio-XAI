@@ -300,9 +300,9 @@ def _init_cdpam():
         kwargs["weights_only"] = False
         return original_load(*args, **kwargs)
 
-    torch.load = _load_unsafe  # type: ignore[assignment] - intentional shadowing for unsafe loads
+    torch.load = _load_unsafe  # type: ignore - intentional shadowing for unsafe loads
     model = cdpam.CDPAM(dev="cpu")
-    torch.load = original_load  # type: ignore[assignment]
+    torch.load = original_load  # type: ignore
     return model
 
 
