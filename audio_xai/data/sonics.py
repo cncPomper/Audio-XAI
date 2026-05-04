@@ -34,16 +34,26 @@ class SonicsDataset(Dataset):
         self.cfg = cfg
         self._samples: list[tuple[Path, int]] = []
 
+        counts: dict[int, int] = {}
         for label, subdir in ((0, cfg.real_subdir), (1, cfg.fake_subdir)):
             folder = cfg.root / subdir
             if not folder.is_dir():
                 raise FileNotFoundError(f"Expected directory: {folder}")
+            count = 0
             for ext in cfg.extensions:
                 for path in sorted(folder.glob(f"*{ext}")):
                     self._samples.append((path, label))
+                    count += 1
+            counts[label] = count
 
-        if not self._samples:
-            raise RuntimeError(f"No audio files found under {cfg.root}")
+        if counts[0] == 0:
+            raise RuntimeError(
+                f"No audio files found in real subdirectory: {cfg.root / cfg.real_subdir}"
+            )
+        if counts[1] == 0:
+            raise RuntimeError(
+                f"No audio files found in fake subdirectory: {cfg.root / cfg.fake_subdir}"
+            )
 
     def __len__(self) -> int:
         return len(self._samples)
