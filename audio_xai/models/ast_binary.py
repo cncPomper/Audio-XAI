@@ -37,7 +37,7 @@ class ASTBinary(AudioClassifier):
                 ignore_mismatched_sizes=True,
             )
         else:
-            cfg = ASTConfig(num_labels=2)
+            cfg = ASTConfig(num_labels=2)  # type: ignore[call-arg]
             self.backbone = ASTForAudioClassification(cfg)
 
         # Differentiable mel spectrogram. kept on the same device as the model.
@@ -74,6 +74,6 @@ class ASTBinary(AudioClassifier):
 
     @property
     def target_layer(self) -> nn.Module:
-        # Last transformer block's layernorm-before-attention works well for
-        # attention-rollout-style Grad-CAM. Adjust if you prefer a different layer.
-        return self.backbone.audio_spectrogram_transformer.encoder.layer[-1].layernorm_before
+        layer = self.backbone.audio_spectrogram_transformer.encoder.layer[-1].layernorm_before
+        assert isinstance(layer, nn.Module)
+        return layer
