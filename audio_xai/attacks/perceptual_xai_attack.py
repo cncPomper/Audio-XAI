@@ -27,6 +27,7 @@ References:
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 
 import torch
@@ -156,10 +157,7 @@ def perceptual_xai_attack(
         loss.backward()
         optimizer.step()
 
-        # Hard L∞ projection — sanity bound on top of the perceptual constraint.
-        with torch.no_grad():
-            delta.clamp_(-cfg.linf_bound, cfg.linf_bound)
-
+        # Log before deleting variables
         if cfg.log_every and step % cfg.log_every == 0:
             history.append(
                 {
@@ -171,6 +169,14 @@ def perceptual_xai_attack(
                     "cos_sim": cos_sim.detach().mean().item(),
                 }
             )
+
+        # Hard L∞ projection — sanity bound on top of the perceptual constraint.
+        with torch.no_grad():
+            delta.clamp_(-cfg.linf_bound, cfg.linf_bound)
+
+        del loss, cam_adv, logits_adv, cos_sim, loss_explain, loss_aud, loss_pred, x_adv
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # ---- Final evaluation ----
     with torch.no_grad():

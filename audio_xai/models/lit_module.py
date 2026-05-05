@@ -7,8 +7,15 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from lightning.pytorch import LightningModule
-from torchmetrics.classification import BinaryAccuracy, BinaryAUROC
+from torchmetrics.classification import (
+    BinaryAccuracy,
+    BinaryAUROC,
+    BinaryF1Score,
+    BinaryRecall,
+    BinarySpecificity,
+)
 
 from audio_xai.models.base import AudioClassifier
 
@@ -42,25 +49,26 @@ def equal_error_rate(scores: torch.Tensor, labels: torch.Tensor) -> float:
 
 
 class RealFakeLitModule(LightningModule):
-    def __init__(self, model: AudioClassifier, lr: float = 1e-4, weight_decay: float = 1e-5):
-        """Initialize the Lightning module for binary real/fake audio classification.
-
-        Configures classifier, optimizer hyperparameters, loss, metrics, and EER buffers.
-
-        Parameters:
-            model (AudioClassifier): The underlying audio classification model to train and evaluate.
-            lr (float): Learning rate for the optimizer.
-            weight_decay (float): Weight decay (L2 regularization) for the optimizer.
-        """
+    def __init__(
+        self,
+        model: AudioClassifier,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-5,
+        class_weights: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
-        self.criterion = nn.CrossEntropyLoss()
+        # register_buffer moves class_weights to the correct device automatically
+        self.register_buffer("_class_weights", class_weights)
 
         self.train_acc = BinaryAccuracy()
         self.val_acc = BinaryAccuracy()
         self.val_auroc = BinaryAUROC()
+        self.val_f1 = BinaryF1Score()
+        self.val_sensitivity = BinaryRecall()       # TPR: fake correctly detected
+        self.val_specificity = BinarySpecificity()  # TNR: real correctly rejected
 
         self._val_scores: list[torch.Tensor] = []
         self._val_labels: list[torch.Tensor] = []
@@ -80,7 +88,7 @@ class RealFakeLitModule(LightningModule):
         """
         wav, label = batch
         logits = self.model(wav)
-        loss = self.criterion(logits, label)
+        loss = F.cross_entropy(logits, label, weight=self._class_weights)
         probs_fake = logits.softmax(dim=-1)[:, 1]
         preds = logits.argmax(dim=-1)
         return loss, probs_fake, preds, label
@@ -115,11 +123,17 @@ class RealFakeLitModule(LightningModule):
         loss, probs_fake, preds, label = self._step(batch)
         self.val_acc.update(preds, label)
         self.val_auroc.update(probs_fake, label)
+        self.val_f1.update(preds, label)
+        self.val_sensitivity.update(preds, label)
+        self.val_specificity.update(preds, label)
         self._val_scores.append(probs_fake)
         self._val_labels.append(label)
         self.log("val/loss", loss, prog_bar=True)
-        self.log("val/acc", self.val_acc, prog_bar=True, on_epoch=True)
+        self.log("val/acc", self.val_acc, on_epoch=True)
         self.log("val/auroc", self.val_auroc, prog_bar=True, on_epoch=True)
+        self.log("val/f1", self.val_f1, on_epoch=True)
+        self.log("val/sensitivity", self.val_sensitivity, on_epoch=True)
+        self.log("val/specificity", self.val_specificity, on_epoch=True)
 
     def on_validation_epoch_end(self):
         """Compute and log the validation EER gathered across all ranks."""
@@ -132,6 +146,12 @@ class RealFakeLitModule(LightningModule):
         labels = torch.cat(self._val_labels)  # [N_local]
         self._val_scores.clear()
         self._val_labels.clear()
+
+        # Debug: Check score distribution
+        if self.trainer.is_global_zero:
+            unique_scores = scores.unique()
+            print(f"[DEBUG] Validation score distribution: min={scores.min():.4f}, max={scores.max():.4f}, unique_values={len(unique_scores)}")
+            print(f"[DEBUG] Label distribution: {labels.unique()} counts: {[(labels==i).sum().item() for i in labels.unique()]}")
 
         # all_gather is a collective — every rank must call it, never gate with is_global_zero.
         # Returns [world_size, N_local] under DDP, or [N_local] on a single device.

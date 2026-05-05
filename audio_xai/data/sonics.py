@@ -18,6 +18,7 @@ class SonicsConfig:
     real_subdir: str = "real"
     fake_subdir: str = "fake"
     extensions: tuple[str, ...] = field(default_factory=lambda: (".wav", ".mp3", ".flac"))
+    max_per_class: int | None = None  # cap each class to this many samples (balanced dataset)
 
 
 class SonicsDataset(Dataset):
@@ -38,9 +39,13 @@ class SonicsDataset(Dataset):
             folder = cfg.root / subdir
             if not folder.is_dir():
                 raise FileNotFoundError(f"Expected directory: {folder}")
+            paths: list[Path] = []
             for ext in cfg.extensions:
-                for path in sorted(folder.glob(f"*{ext}")):
-                    self._samples.append((path, label))
+                paths.extend(sorted(folder.glob(f"*{ext}")))
+            if cfg.max_per_class is not None:
+                paths = paths[: cfg.max_per_class]
+            for path in paths:
+                self._samples.append((path, label))
 
         if not self._samples:
             raise RuntimeError(f"No audio files found under {cfg.root}")

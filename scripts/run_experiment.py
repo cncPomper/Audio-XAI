@@ -40,6 +40,7 @@ SLURM example:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import sys
@@ -49,6 +50,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 # Make the package importable when run directly from the repo root.
@@ -65,20 +67,36 @@ from audio_xai.models.ast_binary import ASTBinary
 from audio_xai.models.lit_module import RealFakeLitModule, equal_error_rate
 from audio_xai.models.vggish_binary import VGGishBinary
 
-
+torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_model(name: str, checkpoint: Path | None) -> torch.nn.Module:
+def _build_model(
+    name: str,
+    checkpoint: Path | None,
+    vggish_ckpt: str | None = None,
+) -> tuple[torch.nn.Module, dict]:
+    """Build model with optional checkpoint loading.
+
+    Returns:
+        tuple: (model, metadata) where metadata contains info about the model source
+    """
+    metadata = {"model_type": name, "checkpoint": None, "pretrained": False}
+
     if name == "ast":
         model = ASTBinary(pretrained=True)
+        metadata["pretrained"] = True
     elif name == "vggish":
-        model = VGGishBinary()
+        model = VGGishBinary(vggish_ckpt=vggish_ckpt)
+        metadata["pretrained"] = vggish_ckpt is not None
     else:
         raise ValueError(f"Unknown model: {name!r}. Choose 'ast' or 'vggish'.")
 
     if checkpoint is not None:
+        if not checkpoint.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+
         lit = RealFakeLitModule.load_from_checkpoint(
             str(checkpoint),
             model=model,
@@ -86,9 +104,13 @@ def _build_model(name: str, checkpoint: Path | None) -> torch.nn.Module:
             map_location="cpu",
         )
         model = lit.model
-        print(f"[checkpoint] loaded {checkpoint}")
+        metadata["checkpoint"] = str(checkpoint)
+        metadata["pretrained"] = False  # Using fine-tuned checkpoint
+        print(f"[checkpoint] loaded from {checkpoint}")
+    else:
+        print(f"[model] using {name} with pretrained weights")
 
-    return model
+    return model, metadata
 
 
 def _snr_db(signal: torch.Tensor, noise: torch.Tensor) -> float:
@@ -218,10 +240,19 @@ def main() -> None:
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--out-dir", type=Path, default=Path("reports/experiment"))
+    p.add_argument("--vggish-ckpt", type=str, default=None,
+                   help="Path to vggish_model.ckpt — required with --model vggish "
+                        "to load pretrained weights and avoid vanishing gradients. "
+                        "Download: https://storage.googleapis.com/audioset/vggish_model.ckpt")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── TensorBoard ───────────────────────────────────────────────────────────
+    log_dir = args.out_dir / "runs"
+    log_dir.mkdir(exist_ok=True)
+    writer = SummaryWriter(str(log_dir))
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     ds_cfg = SonicsConfig(
@@ -245,8 +276,18 @@ def main() -> None:
     print(f"Dataset: {len(dataset)} total files  →  attacking {n} samples (seed={args.seed})")
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = _build_model(args.model, args.checkpoint).to(args.device)
+    model, model_metadata = _build_model(args.model, args.checkpoint,
+                                          vggish_ckpt=args.vggish_ckpt)
+    model = model.to(args.device)
     model.eval()
+
+    # Enable gradient checkpointing to reduce memory usage
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'gradient_checkpointing'):
+        model.backbone.gradient_checkpointing_enable()
+
+    # Disable flash attention to avoid memory issues
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
 
     # ── Baseline ──────────────────────────────────────────────────────────────
     print("Computing baseline metrics …")
@@ -308,8 +349,21 @@ def main() -> None:
         )
         histories.append(result.history)
 
+        # Log to TensorBoard
+        writer.add_scalar("Metrics/cosine_sim", cos_sim, i)
+        writer.add_scalar("Metrics/topk_overlap_10pct", overlap, i)
+        writer.add_scalar("Metrics/heatmap_ssim", ssim, i)
+        writer.add_scalar("Perturbation/delta_linf", d_linf, i)
+        writer.add_scalar("Perturbation/delta_rms", d_rms, i)
+        if math.isfinite(snr):
+            writer.add_scalar("Perturbation/snr_db", snr, i)
+        writer.add_scalar("Results/prediction_preserved", float(result.prediction_preserved.item()), i)
+
+        del result, wav
+        gc.collect()
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Ensure all GPU operations complete before next iteration
 
     # ── Per-sample CSV ────────────────────────────────────────────────────────
     df = pd.DataFrame(records)
@@ -334,6 +388,7 @@ def main() -> None:
     summary = {
         "model": args.model,
         "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+        "model_source": "fine-tuned" if model_metadata["checkpoint"] else "pretrained",
         "n_samples": n,
         "seed": args.seed,
         "baseline": baseline,
@@ -361,6 +416,29 @@ def main() -> None:
         json.dump(summary, f, indent=2)
     print(f"Summary → {summary_path}")
 
+    # Log final summary to TensorBoard
+    r = summary["results"]
+    writer.add_hparams(
+        {
+            "n_steps": atk_cfg.n_steps,
+            "lr": atk_cfg.lr,
+            "lambda_aud": atk_cfg.lambda_audibility,
+            "lambda_pred": atk_cfg.lambda_pred,
+        },
+        {
+            "accuracy": baseline["accuracy"],
+            "auroc": baseline["auroc"],
+            "prediction_preservation_rate": pres_rate,
+            "attack_success_rate": success_rate,
+            "cosine_sim_mean": r["cosine_sim"]["mean"],
+            "topk_overlap_mean": r["topk_overlap_10pct"]["mean"],
+            "heatmap_ssim_mean": r["heatmap_ssim"]["mean"],
+            "snr_db_mean": r["snr_db_mean"] or 0.0,
+        },
+    )
+    writer.close()
+    print(f"TensorBoard logs → {log_dir}")
+
     # ── Plots ─────────────────────────────────────────────────────────────────
     try:
         _save_convergence_plot(histories, args.model, n, args.out_dir)
@@ -373,7 +451,6 @@ def main() -> None:
         print(f"[warn] distributions plot failed: {exc}")
 
     # ── Console summary ───────────────────────────────────────────────────────
-    r = summary["results"]
     sep = "═" * 62
     print(f"\n{sep}")
     print(f"  Perceptual XAI Fragility — {args.model.upper()}")
