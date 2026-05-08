@@ -40,6 +40,12 @@ ffmpeg -version
 ffprobe -version
 ```
 
+## Running tensorboard
+
+```
+tensorboard --logdir $SCRATCH/Audio-XAI/runs/predict --port 6006 --bind_all
+```
+
 ## Development
 
 To set up for local development:
