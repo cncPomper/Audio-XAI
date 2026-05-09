@@ -43,7 +43,7 @@ ffprobe -version
 ## Running tensorboard
 
 ```
-tensorboard --logdir $SCRATCH/Audio-XAI/runs/predict --port 6006 --bind_all
+tensorboard --logdir Audio-XAI/runs/ --port 6006 --bind_all
 ```
 
 ## Development
