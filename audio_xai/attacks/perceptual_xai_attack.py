@@ -27,11 +27,11 @@ References:
 
 from __future__ import annotations
 
-import gc
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from audio_xai.metrics.psychoacoustic import (
     masking_threshold,
@@ -50,6 +50,12 @@ class AttackConfig:
     pred_margin: float = 1.0
     linf_bound: float = 0.01  # hard L∞ bound on δ in waveform amplitude
     sample_rate: int = 16_000
+
+    # Gradient checkpointing: recompute per-layer activations during backward
+    # instead of storing the full second-order graph.  Essential for large
+    # transformer backbones (AST) where math-SDP + create_graph=True otherwise
+    # uses >30 GiB on a single sample.  Has no effect on CNN models.
+    use_gradient_checkpointing: bool = True
 
     # Logging cadence — ``None`` disables.
     log_every: int | None = 20
@@ -110,12 +116,25 @@ def perceptual_xai_attack(
     # ---- Setup: original prediction, original explanation, masking floor ----
     with torch.no_grad():
         logits_orig = model(x)
-        pred_orig = logits_orig.argmax(dim=-1)
-        threshold_db = masking_threshold(x, sample_rate=cfg.sample_rate)
+        if logits_orig.shape[1] == 1:
+            pred_orig = (logits_orig.squeeze(1) >= 0).long()  # sigmoid binary
+        else:
+            pred_orig = logits_orig.argmax(dim=-1)
+        # Compute masking threshold on CPU so its storage doesn't consume GPU
+        # memory.  The audibility loss is also evaluated on CPU each step;
+        # gradient flows back to delta on GPU via PyTorch cross-device autograd.
+        threshold_db = masking_threshold(x.cpu(), sample_rate=cfg.sample_rate)
 
     # Original CAM is computed once and detached — it's our reference target.
+    # Use memory-efficient flash/efficient SDP here: only first-order gradients
+    # are needed (create_graph=False), so math SDP's O(N²) attention matrices
+    # are unnecessary and waste several GiB on large batches.
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False)
     cam_original = gradcam(x, target_class=pred_orig, create_graph=False).detach()
     cam_orig_flat = _flatten_normalize(cam_original)
+    torch.cuda.empty_cache()
 
     # ---- Optimization variable ----
     delta = torch.zeros_like(x, requires_grad=True)
@@ -129,7 +148,27 @@ def perceptual_xai_attack(
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
-    for step in range(cfg.n_steps):
+    # Gradient checkpointing: recompute per-layer activations on-the-fly during
+    # the second-order backward instead of keeping the full graph in VRAM.
+    # use_reentrant=False supports higher-order gradients (reentrant does not).
+    _gc_enabled = False
+    if cfg.use_gradient_checkpointing:
+        backbone = getattr(model, "backbone", None)
+        if backbone is not None and hasattr(backbone, "gradient_checkpointing_enable"):
+            backbone.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            # HuggingFace encoders only activate checkpointing when self.training==True.
+            # Switch to train mode so the flag takes effect; AST has no BatchNorm and
+            # its attention/FF dropouts default to 0.0, so train≈eval in practice.
+            backbone.train()
+            _gc_enabled = True
+
+    pbar = tqdm(range(cfg.n_steps), desc="Attack", unit="step",
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+
+    for step in pbar:
         x_adv = x + delta
 
         # 1. Explanation loss: minimize cosine similarity to the original CAM.
@@ -140,49 +179,84 @@ def perceptual_xai_attack(
         cos_sim = (cam_orig_flat * cam_adv_flat).sum(dim=1)
         loss_explain = cos_sim.mean()
 
-        # 2. Audibility loss: only counts perturbation above masking threshold.
-        loss_aud = perturbation_audibility_loss(delta, threshold_db, sample_rate=cfg.sample_rate)
+        # 2. Audibility loss: evaluated on CPU to avoid GPU OOM on the STFT of
+        #    large waveforms.  delta.cpu() is differentiable so grad flows back.
+        loss_aud = perturbation_audibility_loss(delta.cpu(), threshold_db, sample_rate=cfg.sample_rate)
 
         # 3. Prediction-preserving hinge: penalize only when the wrong class
         #    is within ``pred_margin`` of the right class.
-        correct = logits_adv.gather(1, pred_orig.view(-1, 1)).squeeze(1)
-        # For binary, "other" is just 1 - pred; generalize with masking for n>2.
-        mask = F.one_hot(pred_orig, num_classes=logits_adv.shape[1]).bool()
-        other = logits_adv.masked_fill(mask, float("-inf")).max(dim=-1).values
-        loss_pred = F.relu(other - correct + cfg.pred_margin).mean()
+        if logits_adv.shape[1] == 1:
+            # Single sigmoid logit: correct direction is logit>0 for fake, logit<0 for real.
+            logit = logits_adv.squeeze(1)
+            signed = torch.where(pred_orig == 1, logit, -logit)
+            loss_pred = F.relu(-signed + cfg.pred_margin).mean()
+        else:
+            correct = logits_adv.gather(1, pred_orig.view(-1, 1)).squeeze(1)
+            mask = F.one_hot(pred_orig, num_classes=logits_adv.shape[1]).bool()
+            other = logits_adv.masked_fill(mask, float("-inf")).max(dim=-1).values
+            loss_pred = F.relu(other - correct + cfg.pred_margin).mean()
 
         loss = loss_explain + cfg.lambda_audibility * loss_aud + cfg.lambda_pred * loss_pred
 
         optimizer.zero_grad()
+        # Zero model parameter gradients too — optimizer.zero_grad() only covers
+        # delta. Model params accumulate grad from the second-order backward.
+        model.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
         # Log before deleting variables
         if cfg.log_every and step % cfg.log_every == 0:
-            history.append(
-                {
-                    "step": step,
-                    "loss": loss.item(),
-                    "loss_explain": loss_explain.item(),
-                    "loss_audibility": loss_aud.item(),
-                    "loss_pred": loss_pred.item(),
-                    "cos_sim": cos_sim.detach().mean().item(),
-                }
+            step_log = {
+                "step":             step,
+                "loss":             loss.item(),
+                "loss_explain":     loss_explain.item(),
+                "loss_audibility":  loss_aud.item(),
+                "loss_pred":        loss_pred.item(),
+                "cos_sim":          cos_sim.detach().mean().item(),
+            }
+            history.append(step_log)
+            pbar.set_postfix(
+                loss=f"{step_log['loss']:.4f}",
+                explain=f"{step_log['loss_explain']:.4f}",
+                cos=f"{step_log['cos_sim']:.4f}",
+                pred=f"{step_log['loss_pred']:.4f}",
             )
 
         # Hard L∞ projection — sanity bound on top of the perceptual constraint.
         with torch.no_grad():
             delta.clamp_(-cfg.linf_bound, cfg.linf_bound)
 
-        del loss, cam_adv, logits_adv, cos_sim, loss_explain, loss_aud, loss_pred, x_adv
-        gc.collect()
-        torch.cuda.empty_cache()
+        # cam_adv_flat must be deleted here — it holds a reference to the full
+        # second-order computation graph.  Leaving it alive past the loop would
+        # keep ~38 GiB of graph tensors pinned until Python GC runs.
+        del loss, cam_adv, cam_adv_flat, logits_adv, cos_sim, loss_explain, loss_aud, loss_pred, x_adv
+
+    pbar.close()
+
+    if _gc_enabled:
+        model.backbone.gradient_checkpointing_disable()
+        model.backbone.eval()
+
+    # Switch back to flash/efficient SDP for the first-order final evaluation.
+    # Math SDP was required for the second-order attack loop; flash SDP is
+    # O(N) memory and sufficient for create_graph=False.
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False)
+
+    # Free GPU memory once after the full loop, not on every step.
+    # Calling empty_cache() every step forces a CUDA sync that keeps GPU utilisation low.
+    torch.cuda.empty_cache()
 
     # ---- Final evaluation ----
     with torch.no_grad():
         x_adv_final = (x + delta).detach()
         logits_final = model(x_adv_final)
-        pred_final = logits_final.argmax(dim=-1)
+        if logits_final.shape[1] == 1:
+            pred_final = (logits_final.squeeze(1) >= 0).long()
+        else:
+            pred_final = logits_final.argmax(dim=-1)
         prediction_preserved = pred_final == pred_orig
 
     # Grad-CAM requires gradients to compute even at eval time (it differentiates
