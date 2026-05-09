@@ -34,6 +34,11 @@ If you don't have `ffmpeg` installed, run:
 winget install -e --id Gyan.FFmpeg
 ```
 
+### if you use conda, thats should enough
+```
+conda install -c conda-forge ffmpeg -y
+```
+
 Then verify the installation:
 ```
 ffmpeg -version
