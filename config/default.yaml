@@ -1,0 +1,63 @@
+# Audio-XAI — full hyperparameter reference
+# ------------------------------------------
+# All parameters with their default values.
+# Create a model-specific file (e.g. train_ast.yaml) that overrides only the
+# values you want to change, then pass it with --config.
+# CLI flags always take priority over YAML values.
+
+seed: 42
+clip_seconds: 2.0
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data:
+  # Set root, train_csv, val_csv via --data-root / --train-csv / --val-csv when
+  # the paths are machine-specific (e.g. inside $SCRATCH on a cluster).
+  root: null
+  train_csv: null
+  val_csv: null
+  # Fallbacks used only when train_csv / val_csv are not provided:
+  real_subdir: real
+  fake_subdir: fake
+  val_frac: 0.1
+  max_per_class: null
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  name: ast                               # train: --model; predict: --model-type
+  vggish_ckpt: null                       # path to vggish_model.ckpt (vggish only)
+  checkpoint: null                        # Lightning .ckpt for inference / predict
+  model_id: awsaf49/sonics-spectttra-gamma-120s  # HuggingFace repo (sonics only)
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  batch_size: 64
+  epochs: 10
+  lr: 1.0e-4
+  num_workers: 16
+  out_dir: runs
+
+# ── Cluster (SLURM / Lightning) ───────────────────────────────────────────────
+cluster:
+  num_nodes: 1
+  devices: 1
+  strategy: auto
+  no_auto_requeue: false
+
+# ── Prediction ────────────────────────────────────────────────────────────────
+predict:
+  split: test
+  n_samples: null        # null = use all samples
+  batch_size: 16
+  sample_rate: 16000     # overridden automatically for ast/vggish
+  log_dir: runs/predict
+  device: cuda
+
+# ── XAI Attack ────────────────────────────────────────────────────────────────
+attack:
+  enabled: false
+  n_attack_samples: 10
+  micro_batch: null      # null = single pass; set to e.g. 4 to avoid OOM
+  n_steps: 50
+  lr: 1.0e-3
+  lambda_aud: 1.0
+  lambda_pred: 100.0

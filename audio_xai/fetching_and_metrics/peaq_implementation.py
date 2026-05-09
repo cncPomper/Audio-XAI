@@ -19,7 +19,7 @@ def hz_to_bark(f):
 # =========================
 
 
-def read_wav(path, target_sr=48000, verbose=True):
+def read_wav(path, target_sr=48000, verbose=False):
     """Read an audio file and return a 2-D float64 waveform and its sample rate, optionally resampling to a target rate.
 
     Reads `path` as 2-D array (samples x channels), resamples to `target_sr` if needed, and casts to `np.float64`.
@@ -27,7 +27,7 @@ def read_wav(path, target_sr=48000, verbose=True):
     Parameters:
         path (str): Path to the audio file to read.
         target_sr (int, optional): Desired output sample rate; if different from the file's rate, resampling is performed. Default is 48000.
-        verbose (bool, optional): If True, print file info and resampling details. Default is True.
+        verbose (bool, optional): If True, print file info and resampling details. Default is False.
 
     Returns:
         tuple[np.ndarray, int]: Tuple (x, sr) with 2-D float64 array and sample rate.
@@ -50,7 +50,7 @@ def read_wav(path, target_sr=48000, verbose=True):
     return x.astype(np.float64), sr
 
 
-def align_and_trim(ref, test, verbose=True):
+def align_and_trim(ref, test, verbose=False):
     n = min(len(ref), len(test))
     if verbose:
         print(f"[align_and_trim] ref_len={len(ref)}, test_len={len(test)}, used={n}")
@@ -94,7 +94,7 @@ def bark_bands(sr, n_fft, n_bands=109):
     return bands
 
 
-def band_power_spectrogram(x, sr, frame_size=2048, hop=1024, verbose=True):
+def band_power_spectrogram(x, sr, frame_size=2048, hop=1024, verbose=False):
     frames = frame_signal(x, frame_size, hop)
     win = get_window("hann", frame_size)
 
@@ -125,13 +125,15 @@ def spectral_centroid_from_bands(bp):
     return np.sum(bp * weights[None, :], axis=1) / np.sum(bp, axis=1)
 
 
-def compute_movs_channel(ref, test, sr, verbose=True):
-    print("\n[compute_movs_channel]")
+def compute_movs_channel(ref, test, sr, verbose=False):
+    if verbose:
+        print("\n[compute_movs_channel]")
 
     # --- sanity SNR ---
     err = test - ref
-    snr_est = 10 * np.log10(np.mean(ref**2) / (np.mean(err**2) + 1e-30))
-    print(f"  estimated SNR: {snr_est:.2f} dB")
+    snr_est = 10 * np.log10((np.mean(ref**2) + 1e-30) / (np.mean(err**2) + 1e-30))
+    if verbose:
+        print(f"  estimated SNR: {snr_est:.2f} dB")
 
     ref_bp = band_power_spectrogram(ref, sr, verbose=verbose)
     test_bp = band_power_spectrogram(test, sr, verbose=verbose)
@@ -140,29 +142,35 @@ def compute_movs_channel(ref, test, sr, verbose=True):
     ref_bp = ref_bp[:n]
     test_bp = test_bp[:n]
 
-    ref_db = 10 * np.log10(ref_bp)
-    test_db = 10 * np.log10(test_bp)
+    ref_db = 10 * np.log10(np.maximum(ref_bp, 1e-30))
+    test_db = 10 * np.log10(np.maximum(test_bp, 1e-30))
     diff_db = test_db - ref_db
 
     noise_bp = np.maximum(test_bp - ref_bp, 0.0)
     missing_bp = np.maximum(ref_bp - test_bp, 0.0)
 
-    # ===== KLUCZOWA POPRAWKA =====
     frame_max = np.max(ref_bp, axis=1, keepdims=True)
     mask = ref_bp > (frame_max * 1e-5)
 
-    print("[masking]")
-    print(f"  active ratio: {np.mean(mask):.4f}")
+    if verbose:
+        print("[masking]")
+        print(f"  active ratio: {np.mean(mask):.4f}")
 
-    safe_ref = np.maximum(ref_bp, frame_max * 1e-5)
+    # Use global signal RMS as floor instead of per-frame max to prevent
+    # astronomical relative-diff values when individual frames are near-silent.
+    global_floor = np.maximum(np.mean(ref_bp) * 1e-3, 1e-20)
+    safe_ref = np.maximum(ref_bp, global_floor)
 
     rel_noise = noise_bp / safe_ref
     rel_missing = missing_bp / safe_ref
     rel_diff = np.abs(test_bp - ref_bp) / safe_ref
 
+    if not mask.any():
+        mask = np.ones_like(mask, dtype=bool)
     avg_noise_loudness = np.mean(np.log1p(rel_noise[mask]))
     max_nmr = np.percentile(np.maximum(diff_db[mask], 0), 95)
-    avg_lin_dist = np.mean(rel_diff[mask])
+    # cap avg_lin_dist to log-scale to prevent extreme values from dominating ODG
+    avg_lin_dist = float(np.mean(np.log1p(rel_diff[mask])))
     missing_components = np.mean(np.log1p(rel_missing[mask]))
 
     c_ref = spectral_centroid_from_bands(ref_bp)
@@ -172,8 +180,10 @@ def compute_movs_channel(ref, test, sr, verbose=True):
     ref_energy_band = np.mean(ref_bp, axis=0)
     test_energy_band = np.mean(test_bp, axis=0)
 
-    ref_bw = np.max(np.where(ref_energy_band > 1e-6)[0])
-    test_bw = np.max(np.where(test_energy_band > 1e-6)[0])
+    ref_idx = np.where(ref_energy_band > 1e-6)[0]
+    test_idx = np.where(test_energy_band > 1e-6)[0]
+    ref_bw = int(ref_idx[-1]) if len(ref_idx) else 0
+    test_bw = int(test_idx[-1]) if len(test_idx) else 0
 
     bandwidth_loss = max(0, ref_bw - test_bw) / max(ref_bw, 1)
 
@@ -191,9 +201,10 @@ def compute_movs_channel(ref, test, sr, verbose=True):
         "modulation_diff": float(modulation_diff),
     }
 
-    print("[MOVs]")
-    for k, v in movs.items():
-        print(f"  {k}: {v:.8f}")
+    if verbose:
+        print("[MOVs]")
+        for k, v in movs.items():
+            print(f"  {k}: {v:.8f}")
 
     return movs
 
@@ -203,11 +214,12 @@ def compute_movs_channel(ref, test, sr, verbose=True):
 # =========================
 
 
-def movs_to_odg(movs):
+def movs_to_odg(movs, verbose=False):
+    # avg_lin_dist is already log1p-scaled in compute_movs_channel, so use it directly
     raw = (
         0.55 * np.log1p(movs["avg_noise_loudness"])
         + 0.030 * movs["max_nmr_db_p95"]
-        + 0.35 * np.log1p(movs["avg_lin_dist"])
+        + 0.35 * movs["avg_lin_dist"]
         + 0.45 * np.log1p(movs["missing_components"])
         + 1.20 * movs["centroid_shift"]
         + 1.80 * movs["bandwidth_loss"]
@@ -217,9 +229,10 @@ def movs_to_odg(movs):
     odg = -4.0 * (1.0 - np.exp(-raw))
     odg = float(np.clip(odg, -4.0, 0.0))
 
-    print("[movs_to_odg]")
-    print(f"  raw={raw:.6f}")
-    print(f"  ODG={odg:.4f}")
+    if verbose:
+        print("[movs_to_odg]")
+        print(f"  raw={raw:.6f}")
+        print(f"  ODG={odg:.4f}")
 
     return odg
 
@@ -229,25 +242,28 @@ def movs_to_odg(movs):
 # =========================
 
 
-def peaq_like(ref_wav, test_wav):
-    print("\n========== PEAQ DEBUG ==========")
+def peaq_like(ref_wav, test_wav, verbose=False):
+    if verbose:
+        print("\n========== PEAQ DEBUG ==========")
 
-    ref, sr = read_wav(ref_wav)
-    test, _ = read_wav(test_wav)
+    ref, sr = read_wav(ref_wav, verbose=verbose)
+    test, _ = read_wav(test_wav, verbose=verbose)
 
-    ref, test = align_and_trim(ref, test)
+    ref, test = align_and_trim(ref, test, verbose=verbose)
 
     odgs = []
 
     for ch in range(min(ref.shape[1], test.shape[1])):
-        print(f"\n--- CHANNEL {ch} ---")
-        movs = compute_movs_channel(ref[:, ch], test[:, ch], sr)
-        odg = movs_to_odg(movs)
+        if verbose:
+            print(f"\n--- CHANNEL {ch} ---")
+        movs = compute_movs_channel(ref[:, ch], test[:, ch], sr, verbose=verbose)
+        odg = movs_to_odg(movs, verbose=verbose)
         odgs.append(odg)
 
-    final = np.mean(odgs)
+    final = float(np.mean(odgs))
 
-    print("\nFINAL ODG:", final)
+    if verbose:
+        print("\nFINAL ODG:", final)
     return final
 
 

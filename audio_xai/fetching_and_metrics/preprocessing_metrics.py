@@ -15,7 +15,7 @@ import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
-from peaq_implementation import peaq_like
+from audio_xai.fetching_and_metrics.peaq_implementation import peaq_like
 from pymcd.mcd import Calculate_MCD
 from pystoi import stoi
 from scipy.stats import entropy
@@ -141,8 +141,15 @@ def distort_signal(
 
 
 def _iter_chunks(a, b, chunk_size: int):
-    """Yield aligned chunk pairs along the last axis (tensors or arrays)."""
+    """Yield aligned chunk pairs along the last axis (tensors or arrays).
+
+    When the signal is shorter than one chunk, yields the full signal so that
+    metrics like PESQ don't silently return 0 for short clips.
+    """
     T = min(a.shape[-1], b.shape[-1])
+    if T < chunk_size:
+        yield a[..., :T], b[..., :T]
+        return
     for start in range(0, T - chunk_size + 1, chunk_size):
         yield a[..., start : start + chunk_size], b[..., start : start + chunk_size]
 
@@ -194,15 +201,18 @@ def compute_stoi(
     T = min(len(y_a), len(y_b))
     a, b = y_a[:T], y_b[:T]
     scores = []
-    for start in range(0, T - PESQ_CHUNK_SIZE + 1, PESQ_CHUNK_SIZE):
-        scores.append(
-            stoi(
-                a[start : start + PESQ_CHUNK_SIZE],
-                b[start : start + PESQ_CHUNK_SIZE],
-                sr,
-                extended=extended,
+    if T < PESQ_CHUNK_SIZE:
+        scores.append(stoi(a, b, sr, extended=extended))
+    else:
+        for start in range(0, T - PESQ_CHUNK_SIZE + 1, PESQ_CHUNK_SIZE):
+            scores.append(
+                stoi(
+                    a[start : start + PESQ_CHUNK_SIZE],
+                    b[start : start + PESQ_CHUNK_SIZE],
+                    sr,
+                    extended=extended,
+                )
             )
-        )
     return float(np.mean(scores)) if scores else 0.0
 
 

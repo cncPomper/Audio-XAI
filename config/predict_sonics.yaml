@@ -1,0 +1,31 @@
+# Sonics Spectttra prediction and XAI attack configuration
+# predict.py reads: [model], [predict]
+# attack.py reads:  [model], [predict.split], [attack]
+# Pass machine-specific paths via CLI:
+#   --data-root $DATA_ROOT --log-dir $LOG_DIR
+# No --checkpoint needed: weights are downloaded from HuggingFace automatically.
+
+seed: 42
+clip_seconds: 5.0
+
+model:
+  name: sonics
+  model_id: awsaf49/sonics-spectttra-gamma-5s
+
+predict:
+  split: test
+  n_samples: 500        # null = full test set (~3342 samples, ~2-3 min); set e.g. 500 for quick runs
+  batch_size: 32
+  sample_rate: 16000
+  log_dir: runs/predict
+  device: cuda
+
+attack:
+  n_attack_samples: 1000
+  micro_batch: 4
+  n_steps: 50
+  lr: 1.0e-3
+  lambda_aud: 1.0
+  lambda_pred: 100.0
+  log_dir: runs/attack
+  device: cuda

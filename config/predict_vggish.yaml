@@ -1,0 +1,29 @@
+# VGGish prediction and XAI attack configuration
+# predict.py reads: [model], [predict]
+# attack.py reads:  [model], [predict.split], [attack]
+# Pass machine-specific paths via CLI:
+#   --data-root $DATA_ROOT --checkpoint $CKPT --log-dir $LOG_DIR
+
+seed: 42
+clip_seconds: 5.0
+
+model:
+  name: vggish
+  checkpoint: /net/tscratch/people/plgpkitlo/Audio-XAI/runs/vggish/version_3/checkpoints/epoch-epoch=009.ckpt   # override with --checkpoint path/to/epoch.ckpt
+
+predict:
+  split: test
+  n_samples: 500        # null = full test set (~3342 samples, ~2-3 min); set e.g. 500 for quick runs
+  batch_size: 32
+  log_dir: runs/predict
+  device: cuda
+
+attack:
+  n_attack_samples: 1000
+  micro_batch: 2   # Reduced from 4 to 2 to avoid GPU OOM on VGGish
+  n_steps: 50
+  lr: 1.0e-3
+  lambda_aud: 1.0
+  lambda_pred: 100.0
+  log_dir: runs/attack
+  device: cuda

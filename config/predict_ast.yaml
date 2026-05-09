@@ -1,0 +1,29 @@
+# AST prediction and XAI attack configuration
+# predict.py reads: [model], [predict]
+# attack.py reads:  [model], [predict.split], [attack]
+# Pass machine-specific paths via CLI:
+#   --data-root $DATA_ROOT --checkpoint $CKPT --log-dir $LOG_DIR
+
+seed: 42
+clip_seconds: 5.0
+
+model:
+  name: ast
+  checkpoint: /net/tscratch/people/plgpkitlo/Audio-XAI/runs/ast/version_5/checkpoints/epoch=4-step=9740.ckpt   # override with --checkpoint path/to/epoch.ckpt
+
+predict:
+  split: test
+  n_samples: 500
+  batch_size: 16
+  log_dir: runs/predict
+  device: cuda
+
+attack:
+  n_attack_samples: 1000
+  micro_batch: 1      # Reduced from 4 to 1 to avoid GPU OOM on AST
+  n_steps: 50
+  lr: 1.0e-3
+  lambda_aud: 1.0
+  lambda_pred: 100.0
+  log_dir: runs/attack
+  device: cuda
