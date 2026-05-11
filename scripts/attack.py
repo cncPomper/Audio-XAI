@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import gc
 import json
 import os
@@ -219,6 +220,28 @@ def load_waveform(path: Path, sample_rate: int, clip_len: int) -> torch.Tensor:
     return torch.from_numpy(y)
 
 
+def load_full_waveform(path: Path, sample_rate: int) -> torch.Tensor:
+    """Load the entire audio file without any length clipping. Returns 1-D tensor [T]."""
+    y, _ = librosa.load(str(path), sr=sample_rate, mono=True)
+    return torch.from_numpy(y)
+
+
+def _select_balanced_batch(
+    samples: list[tuple[Path, int]],
+    n: int,
+    seed: int = 0,
+) -> tuple[list[Path], list[int]]:
+    """Select n balanced paths+labels (n/2 real, n/2 fake) without loading audio."""
+    rng = random.Random(seed)
+    real = [(p, l) for p, l in samples if l == 0]
+    fake = [(p, l) for p, l in samples if l == 1]
+    rng.shuffle(real)
+    rng.shuffle(fake)
+    chosen = real[: n // 2] + fake[: n // 2]
+    rng.shuffle(chosen)
+    return [p for p, _ in chosen], [l for _, l in chosen]
+
+
 def load_balanced_batch(
     samples: list[tuple[Path, int]],
     n: int,
@@ -314,6 +337,7 @@ def _run_attack_chunked(
     x_atk: torch.Tensor,
     cfg: "AttackConfig",
     micro_bs: int,
+    device: str | None = None,
 ) -> "AttackResult":
     """Run the perceptual XAI attack in GPU micro-batches and concatenate results.
 
@@ -321,6 +345,9 @@ def _run_attack_chunked(
     so attacking in chunks of micro_bs is mathematically equivalent to the full
     batch — without the OOM. Grad-CAM hooks are re-registered for every chunk
     because perceptual_xai_attack removes them at the end.
+
+    If `device` is provided, each chunk is moved there just before attacking and
+    freed immediately after — x_atk can safely stay on CPU.
     """
     n = x_atk.shape[0]
     chunks = [x_atk[i : i + micro_bs] for i in range(0, n, micro_bs)]
@@ -332,6 +359,8 @@ def _run_attack_chunked(
     for idx, chunk in enumerate(chunks):
         tqdm.write(f"  micro-batch {idx + 1}/{len(chunks)}  "
                    f"({chunk.shape[0]} samples)")
+        if device is not None:
+            chunk = chunk.to(device)
         gradcam = _make_gradcam(model_type, attack_model)
         result = perceptual_xai_attack(attack_model, chunk, cfg, gradcam=gradcam)
         parts_x_adv.append(result.x_adv.cpu())
@@ -341,7 +370,7 @@ def _run_attack_chunked(
         parts_cos_sim.append(result.cosine_similarity.cpu())
         parts_pred_pres.append(result.prediction_preserved.cpu())
         history_chunks.append(result.history)
-        del result, gradcam
+        del result, gradcam, chunk
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -363,6 +392,101 @@ def _run_attack_chunked(
         prediction_preserved=torch.cat(parts_pred_pres),
         history=merged_history,
     )
+
+
+# ── Sliding-window helpers ────────────────────────────────────────────────────
+
+def _split_into_windows(
+    x: torch.Tensor,
+    clip_len: int,
+    hop_len: int,
+) -> tuple[torch.Tensor, int]:
+    """Split a 1-D waveform [T] into [N, clip_len] windows with `hop_len` stride.
+
+    The last window is zero-padded when the audio does not fill it completely.
+    Returns (windows [N, clip_len], original_length T).
+    """
+    T = x.shape[0]
+    windows = []
+    for s in range(0, T, hop_len):
+        chunk = x[s : s + clip_len]
+        if chunk.shape[0] < clip_len:
+            chunk = torch.nn.functional.pad(chunk, (0, clip_len - chunk.shape[0]))
+        windows.append(chunk)
+    return torch.stack(windows), T
+
+
+def _stitch_delta(
+    deltas: torch.Tensor,
+    clip_len: int,
+    hop_len: int,
+    original_len: int,
+) -> torch.Tensor:
+    """Reconstruct a full-length delta from per-window deltas [N, clip_len].
+
+    Uses overlap-add with a Hann window when windows overlap (hop_len < clip_len)
+    for smooth transitions. Falls back to a rectangular window (simple tiling)
+    when there is no overlap.
+    """
+    N = deltas.shape[0]
+    buf = torch.zeros(original_len + clip_len, dtype=deltas.dtype)
+    wgt = torch.zeros_like(buf)
+
+    win = (
+        torch.hann_window(clip_len, periodic=False)
+        if hop_len < clip_len
+        else torch.ones(clip_len, dtype=deltas.dtype)
+    )
+
+    for i in range(N):
+        s = i * hop_len
+        buf[s : s + clip_len] += win * deltas[i].cpu()
+        wgt[s : s + clip_len] += win
+
+    wgt.clamp_(min=1e-8)
+    return (buf / wgt)[:original_len]
+
+
+def _attack_full_audio_sample(
+    model_type: str,
+    attack_model,
+    x_full: torch.Tensor,
+    cfg: "AttackConfig",
+    clip_len: int,
+    hop_len: int,
+    micro_bs: int,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor, "AttackResult"]:
+    """Attack a single full-length waveform via a sliding window.
+
+    Splits x_full [T] (CPU) into overlapping clip_len windows, attacks every
+    window in micro-batches of `micro_bs`, then stitches the per-window deltas
+    back into a full-length delta via overlap-add.
+
+    Args:
+        x_full:   1-D CPU float32 tensor [T].
+        clip_len: Window size in samples (clip_seconds × sample_rate).
+        hop_len:  Hop size in samples.  Equal to clip_len → no overlap.
+                  Smaller → overlapping windows stitched with a Hann window.
+        micro_bs: Windows processed on GPU simultaneously (1 is safest for AST).
+
+    Returns:
+        x_adv_full [T], delta_full [T], window_result (AttackResult with N rows).
+    """
+    windows, T = _split_into_windows(x_full, clip_len, hop_len)
+    n_win = windows.shape[0]
+    overlap_pct = (1.0 - hop_len / clip_len) * 100.0
+    print(f"  sliding-window: {T / cfg.sample_rate:.1f}s → {n_win} windows  "
+          f"(clip={clip_len / cfg.sample_rate:.1f}s, "
+          f"hop={hop_len / cfg.sample_rate:.1f}s, overlap={overlap_pct:.0f}%)")
+
+    window_result = _run_attack_chunked(
+        model_type, attack_model, windows, cfg, micro_bs, device=device,
+    )
+
+    delta_full = _stitch_delta(window_result.delta, clip_len, hop_len, T)
+    x_adv_full = (x_full.cpu() + delta_full).clamp(-1.0, 1.0)
+    return x_adv_full, delta_full, window_result
 
 
 # ── TensorBoard helpers ───────────────────────────────────────────────────────
@@ -470,6 +594,8 @@ def _save_sample_images(
         return _make_spectrogram_image(wav, sample_rate).permute(1, 2, 0).numpy()
 
     def _cam_hwc(cam: np.ndarray, ref_shape: tuple) -> np.ndarray:
+        if cam.ndim == 1:
+            cam = cam[np.newaxis, :]   # [T] → [1, T]: treat as freq=1 time map
         t = torch.from_numpy(cam).unsqueeze(0).unsqueeze(0).float()
         t = F.interpolate(t, size=ref_shape, mode="bilinear", align_corners=False)
         return _heatmap_to_rgb(t.squeeze().numpy())
@@ -688,20 +814,34 @@ def main() -> None:
                         "Required: set via --config YAML (attack.n_attack_samples) "
                         "or pass explicitly.")
     p.add_argument("--attack-micro-batch", type=int, default=None,
-                   help="GPU micro-batch size for the attack. Use a small value "
-                        "(e.g. 4) for large transformers (AST/Sonics) to avoid OOM. "
-                        "Defaults to --n-attack-samples (single pass).")
+                   help="Number of windows processed on GPU simultaneously in "
+                        "full-audio mode. Default 1 (safest). Increase if VRAM allows.")
     p.add_argument("--n-steps",          type=int, default=50,
                    help="Adam optimisation steps for the attack")
     p.add_argument("--lr",               type=float, default=1e-3)
     p.add_argument("--lambda-aud",       type=float, default=1.0)
     p.add_argument("--lambda-pred",      type=float, default=100.0)
+    p.add_argument("--pred-margin",      type=float, default=1.0,
+                   help="Hinge margin for prediction-preserving loss. "
+                        "Lower values (e.g. 0.0) activate the penalty earlier "
+                        "and leave less room for prediction flips.")
+
+    # Sliding-window full-audio mode
+    p.add_argument("--full-audio",       action="store_true", default=False,
+                   help="Attack the full audio length via a sliding window instead "
+                        "of a fixed clip. Each file is split into clip_seconds windows "
+                        "with window-hop-seconds stride, attacked independently, and "
+                        "stitched back with overlap-add.")
+    p.add_argument("--window-hop-seconds", type=float, default=None,
+                   help="Hop size in seconds between consecutive windows. "
+                        "Defaults to --clip-seconds (no overlap). "
+                        "Set smaller (e.g. half of clip_seconds) for 50%% overlap "
+                        "with Hann-window blending at boundaries.")
 
     # Output
     p.add_argument("--log-dir", type=Path, default=Path("runs/attack"))
     p.add_argument("--device",  default="cuda" if torch.cuda.is_available() else "cpu")
 
-    # set_defaults must come after all add_argument calls so it can update action.default
     if _pre_args.config:
         from audio_xai.hparams import attack_defaults
         p.set_defaults(**attack_defaults(_pre_args.config))
@@ -732,115 +872,362 @@ def main() -> None:
         print("No files found — check --data-root and --split.")
         return
 
-    # ── 3. Load balanced attack batch ─────────────────────────────────────────
+    # ── 3. Select balanced sample list (no audio loaded yet) ──────────────────
     print(f"\n── Perceptual XAI attack  "
           f"({args.n_attack_samples} samples, {args.n_steps} steps) ───────")
-
-    x_atk, gt_attack, atk_paths = load_balanced_batch(
-        samples, args.n_attack_samples, sample_rate, clip_len, args.device, seed=args.seed
+    atk_paths, gt_labels_list = _select_balanced_batch(
+        samples, args.n_attack_samples, seed=args.seed
     )
-    print(f"Attack batch: {list(x_atk.shape)}  "
-          f"(real={(gt_attack==0).sum().item()}, fake={(gt_attack==1).sum().item()})")
+    n_sel_real = sum(1 for l in gt_labels_list if l == 0)
+    n_sel_fake = sum(1 for l in gt_labels_list if l == 1)
+    print(f"Selected {len(atk_paths)} samples  ({n_sel_real} real, {n_sel_fake} fake)")
 
-    # ── 4. Baseline prediction on attack batch ────────────────────────────────
-    preds_orig_atk, probs_orig_atk = predict_batch(infer_model, x_atk)
-    orig_atk_metrics = compute_metrics(
-        gt_attack.cpu().numpy(),
-        preds_orig_atk.cpu().numpy(),
-        probs_orig_atk.cpu().numpy(),
-    )
-    _print_metrics("Original (attack batch)", orig_atk_metrics)
+    # ── Setup output paths + TensorBoard writer ───────────────────────────────
+    ckpt_tag = Path(args.checkpoint).stem if args.checkpoint else args.model_id.replace("/", "_")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    run_name = f"{args.model_type}_{ckpt_tag}_{args.split}_{ts}"
+    log_path = args.log_dir / run_name
+    log_path.mkdir(parents=True, exist_ok=True)
+    audio_dir = log_path / "audio"
 
-    # ── 5. Run attack ─────────────────────────────────────────────────────────
+    writer = SummaryWriter(log_dir=str(log_path))
+
+    # ── Attack config ──────────────────────────────────────────────────────────
     cfg = AttackConfig(
         n_steps=args.n_steps,
         lr=args.lr,
         lambda_audibility=args.lambda_aud,
         lambda_pred=args.lambda_pred,
+        pred_margin=args.pred_margin,
         log_every=1,
         sample_rate=sample_rate,
     )
+    hop_len = int((args.window_hop_seconds or args.clip_seconds) * sample_rate)
+    # Full-audio mode MUST use 1 window at a time: the YAML micro_batch (e.g. 16)
+    # was meant for clipped-mode sample batching, not for stacking 16 windows
+    # simultaneously through a second-order GradCAM backward — that fills 39 GiB.
+    sw_micro_bs = 1
 
-    micro_bs = args.attack_micro_batch or args.n_attack_samples
-    n_chunks = (args.n_attack_samples + micro_bs - 1) // micro_bs
-    print(f"  micro-batch size: {micro_bs}  ({n_chunks} chunk(s))")
+    if args.full_audio:
+        overlap_pct = (1.0 - hop_len / clip_len) * 100.0
+        print(f"  Full-audio mode: window={args.clip_seconds}s  "
+              f"hop={hop_len/sample_rate:.2f}s  overlap={overlap_pct:.0f}%  "
+              f"micro_bs={sw_micro_bs}")
 
-    t_atk = time.time()
-    if micro_bs >= args.n_attack_samples:
-        gradcam = _make_gradcam(args.model_type, attack_model)
-        attack_result = perceptual_xai_attack(attack_model, x_atk, cfg, gradcam=gradcam)
-    else:
-        attack_result = _run_attack_chunked(
-            args.model_type, attack_model, x_atk, cfg, micro_bs
-        )
-    print(f"Attack done in {time.time()-t_atk:.1f}s")
+    # ── Per-sample accumulators (scalars only — no tensors kept across samples) ──
+    all_labels:        list[int]        = []
+    all_preds_orig:    list[int]        = []
+    all_probs_orig:    list[float]      = []
+    all_preds_adv:     list[int]        = []
+    all_probs_adv:     list[float]      = []
+    all_cos_sims:      list[float]      = []
+    all_top10_overlap: list[float]      = []
+    all_pred_pres:     list[int]        = []
+    all_delta_linf:    list[float]      = []
+    all_audio_quality: list[dict]       = []
+    all_histories:     list[list[dict]] = []
 
-    # ── 6. Post-attack prediction ─────────────────────────────────────────────
-    preds_adv, probs_adv = predict_batch(infer_model, attack_result.x_adv.to(args.device))
-    adv_metrics = compute_metrics(
-        gt_attack.cpu().numpy(),
-        preds_adv.cpu().numpy(),
-        probs_adv.cpu().numpy(),
-    )
+    t_total = time.time()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Main per-sample loop: load → attack → metrics → save → free
+    # ──────────────────────────────────────────────────────────────────────────
+    for i, (path, label) in enumerate(zip(atk_paths, gt_labels_list)):
+        _gpu_used = torch.cuda.memory_allocated() / 1e9
+        print(f"\n{'='*60}")
+        print(f"  [{i+1}/{len(atk_paths)}] {path.name}  "
+              f"(label={'real' if label==0 else 'fake'})  "
+              f"GPU: {_gpu_used:.2f} GiB")
+        print(f"{'='*60}")
+
+        # variables declared here so finally block can reference them safely
+        x_single = x_clip = x_adv_clip = None
+        x_adv_full = delta_full = delta_clip = None
+        orig_cpu = adv_cpu = orig_save = adv_save = dlt_save = None
+        pred_orig = prob_orig = pred_adv = prob_adv = None
+        cos_sim_t = pred_pres_t = None
+        cam_orig_np: np.ndarray | None = None
+        cam_adv_np:  np.ndarray | None = None
+        history: list[dict] = []
+
+        try:
+            # ── Load single audio ──────────────────────────────────────────────
+            if args.full_audio:
+                x_single = load_full_waveform(path, sample_rate)   # [T]
+            else:
+                x_single = load_waveform(path, sample_rate, clip_len)  # [clip_len]
+
+            x_clip = x_single[:clip_len].unsqueeze(0).to(args.device)  # [1, clip_len]
+
+            # ── Baseline prediction ────────────────────────────────────────────
+            pred_orig, prob_orig = predict_batch(infer_model, x_clip)
+
+            # ── Attack ────────────────────────────────────────────────────────
+            if args.full_audio:
+                x_adv_full, delta_full, win_result = _attack_full_audio_sample(
+                    args.model_type, attack_model, x_single, cfg,
+                    clip_len, hop_len, sw_micro_bs, args.device,
+                )
+                x_adv_clip  = x_adv_full[:clip_len].unsqueeze(0).to(args.device)
+                cos_sim_t   = win_result.cosine_similarity
+                pred_pres_t = win_result.prediction_preserved
+                history     = win_result.history
+                # First window's CAMs for visualization (representative clip)
+                cam_orig_np = win_result.cam_original[0].cpu().numpy()
+                cam_adv_np  = win_result.cam_adv[0].cpu().numpy()
+                del win_result
+            else:
+                gradcam = _make_gradcam(args.model_type, attack_model)
+                result  = perceptual_xai_attack(attack_model, x_clip, cfg, gradcam=gradcam)
+                x_adv_clip  = result.x_adv
+                delta_clip  = result.delta.squeeze(0).cpu()
+                cos_sim_t   = result.cosine_similarity
+                pred_pres_t = result.prediction_preserved
+                history     = result.history
+                cam_orig_np = result.cam_original[0].cpu().numpy()
+                cam_adv_np  = result.cam_adv[0].cpu().numpy()
+                del result, gradcam
+
+            # ── Post-attack prediction ─────────────────────────────────────────
+            pred_adv, prob_adv = predict_batch(infer_model, x_adv_clip)
+
+            # ── Derived scalars ────────────────────────────────────────────────
+            orig_cpu  = x_clip.squeeze(0).cpu()      # [clip_len]
+            adv_cpu   = x_adv_clip.squeeze(0).cpu()  # [clip_len]
+            cos_mean  = float(cos_sim_t.mean().item())
+            pred_pres = int(pred_pres_t.all().item())
+
+            if args.full_audio:
+                delta_linf = float(delta_full.abs().max().item())
+                orig_save  = x_single.cpu()
+                adv_save   = x_adv_full.cpu()
+                dlt_save   = delta_full.cpu()
+            else:
+                delta_linf = float(delta_clip.abs().max().item())
+                orig_save  = orig_cpu
+                adv_save   = adv_cpu
+                dlt_save   = delta_clip
+
+            # top-10% CAM overlap (clipped mode only — full-audio has no CAMs)
+            if cam_orig_np is not None:
+                cam_o_t  = torch.from_numpy(cam_orig_np).unsqueeze(0)
+                cam_a_t  = torch.from_numpy(cam_adv_np).unsqueeze(0)
+                over_val = float(topk_overlap(cam_o_t, cam_a_t, k_frac=0.1).item())
+            else:
+                over_val = 0.0
+
+            # ── Psychoacoustic metrics ─────────────────────────────────────────
+            print("  Computing perceptual metrics...")
+            psy = _psychoacoustic_one(i, orig_cpu, adv_cpu, sample_rate)
+            psy_str = "  ".join(
+                f"{k.upper()}={v:.3f}" for k, v in psy.items() if v is not None
+            )
+            print(f"  {psy_str}")
+
+            # ── Per-sample JSON ────────────────────────────────────────────────
+            sample_metrics = {
+                "index":          i,
+                "stem":           path.stem,
+                "label":          label,
+                "label_str":      "real" if label == 0 else "fake",
+                "pred_orig":      int(pred_orig.item()),
+                "prob_orig":      round(float(prob_orig.item()), 6),
+                "pred_adv":       int(pred_adv.item()),
+                "prob_adv":       round(float(prob_adv.item()), 6),
+                "correct_orig":   int(pred_orig.item() == label),
+                "correct_adv":    int(pred_adv.item() == label),
+                "pred_preserved": pred_pres,
+                "cos_sim":        round(cos_mean, 6),
+                "top10_overlap":  round(over_val, 6),
+                "delta_linf":     round(delta_linf, 6),
+                **{k: (round(v, 6) if isinstance(v, float) else v)
+                   for k, v in psy.items()},
+            }
+            sample_json = log_path / f"sample_{i:04d}_{path.stem}.json"
+            sample_json.write_text(json.dumps(sample_metrics, indent=2))
+            print(f"  Saved metrics → {sample_json.name}")
+
+            # ── Save audio: full-length original / adversarial / delta ─────────
+            sample_audio_dir = audio_dir / path.stem
+            sample_audio_dir.mkdir(parents=True, exist_ok=True)
+            torchaudio.save(str(sample_audio_dir / "original.wav"),
+                            orig_save.unsqueeze(0), sample_rate)
+            torchaudio.save(str(sample_audio_dir / "adversarial.wav"),
+                            adv_save.unsqueeze(0), sample_rate)
+            torchaudio.save(str(sample_audio_dir / "delta.wav"),
+                            dlt_save.unsqueeze(0), sample_rate)
+            print(f"  Saved audio   → {sample_audio_dir}")
+
+            # ── TensorBoard (per-sample) ───────────────────────────────────────
+            writer.add_image(f"spectrogram/{path.stem}/original",
+                             _make_spectrogram_image(orig_cpu, sample_rate), 0)
+            writer.add_image(f"spectrogram/{path.stem}/adversarial",
+                             _make_spectrogram_image(adv_cpu, sample_rate), 0)
+            writer.add_image(f"spectrogram/{path.stem}/delta",
+                             _make_spectrogram_image(dlt_save[:clip_len], sample_rate), 0)
+            if i < 10:  # audio in TB only for first 10 (large blobs)
+                writer.add_audio(f"audio/{path.stem}/original",
+                                 orig_cpu.unsqueeze(0), sample_rate=sample_rate)
+                writer.add_audio(f"audio/{path.stem}/adversarial",
+                                 adv_cpu.unsqueeze(0), sample_rate=sample_rate)
+
+            # ── Heatmaps + panel images (clipped mode only) ────────────────────
+            if cam_orig_np is not None:
+                hmap_dir = log_path / "heatmaps" / path.stem
+                hmap_dir.mkdir(parents=True, exist_ok=True)
+                np.save(str(hmap_dir / "original.npy"),    cam_orig_np)
+                np.save(str(hmap_dir / "adversarial.npy"), cam_adv_np)
+                _save_sample_images(
+                    sample_dir  = log_path / "images" / path.stem,
+                    orig_wav    = orig_cpu,
+                    adv_wav     = adv_cpu,
+                    delta_wav   = dlt_save,
+                    cam_orig    = cam_orig_np,
+                    cam_adv     = cam_adv_np,
+                    sample_rate = sample_rate,
+                    stem        = path.stem,
+                    label       = label,
+                    pred_orig   = int(pred_orig.item()),
+                    pred_adv    = int(pred_adv.item()),
+                )
+
+            # ── Accumulate scalars for summary ─────────────────────────────────
+            all_labels.append(label)
+            all_preds_orig.append(int(pred_orig.item()))
+            all_probs_orig.append(float(prob_orig.item()))
+            all_preds_adv.append(int(pred_adv.item()))
+            all_probs_adv.append(float(prob_adv.item()))
+            all_cos_sims.append(cos_mean)
+            all_top10_overlap.append(over_val)
+            all_pred_pres.append(pred_pres)
+            all_delta_linf.append(delta_linf)
+            all_audio_quality.append(psy)
+            all_histories.append(history)
+
+        except Exception as exc:
+            import traceback
+            print(f"  [ERROR] sample {i} ({path.name}): {exc}")
+            traceback.print_exc()
+
+        finally:
+            # ── Set every tensor to None so ref-counts drop to zero NOW ────────
+            # (for obj in ...: del obj  only removes the loop var — the originals
+            #  stay alive until the next iteration overwrites them, defeating
+            #  empty_cache() which can only free tensors with no live references.)
+            x_single    = None
+            x_clip      = None
+            x_adv_clip  = None   # GPU tensor — must be freed before empty_cache
+            x_adv_full  = None
+            delta_full  = None
+            delta_clip  = None
+            orig_cpu    = None
+            adv_cpu     = None
+            orig_save   = None
+            adv_save    = None
+            dlt_save    = None
+            pred_orig   = None
+            prob_orig   = None
+            pred_adv    = None
+            prob_adv    = None
+            cos_sim_t   = None
+            pred_pres_t = None
+            cam_orig_np = None
+            cam_adv_np  = None
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    # ── End of per-sample loop ─────────────────────────────────────────────────
+    elapsed = time.time() - t_total
+    n_done  = len(all_labels)
+    print(f"\nAll {n_done}/{len(atk_paths)} samples done in {elapsed:.1f}s  "
+          f"({elapsed / max(n_done, 1):.1f}s / sample)")
+
+    if not all_labels:
+        print("No samples processed successfully.")
+        writer.close()
+        return
+
+    # ── Aggregate classification metrics ───────────────────────────────────────
+    labels_np     = np.array(all_labels)
+    preds_orig_np = np.array(all_preds_orig)
+    probs_orig_np = np.array(all_probs_orig)
+    preds_adv_np  = np.array(all_preds_adv)
+    probs_adv_np  = np.array(all_probs_adv)
+
+    orig_atk_metrics = compute_metrics(labels_np, preds_orig_np, probs_orig_np)
+    adv_metrics      = compute_metrics(labels_np, preds_adv_np,  probs_adv_np)
+    _print_metrics("Original (attack batch)", orig_atk_metrics)
     _print_metrics("Adversarial predictions", adv_metrics)
 
-    cos  = attack_result.cosine_similarity
-    over = topk_overlap(attack_result.cam_original, attack_result.cam_adv, k_frac=0.1)
-    print(f"\n  CAM cosine sim  : mean={cos.mean():.4f}  (lower = more explanation change)")
-    print(f"  Top-10% overlap : mean={over.mean():.4f}  (lower = more disagreement)")
-    print(f"  δ L∞            : {attack_result.delta.abs().max():.5f}")
-    print(f"  Pred preserved  : "
-          f"{attack_result.prediction_preserved.sum().item()}/{args.n_attack_samples}")
+    mean_cos   = float(np.mean(all_cos_sims))      if all_cos_sims      else 0.0
+    mean_over  = float(np.mean(all_top10_overlap)) if all_top10_overlap else 0.0
+    mean_linf  = float(np.mean(all_delta_linf))    if all_delta_linf    else 0.0
+    pred_pres_frac = float(np.mean(all_pred_pres)) if all_pred_pres     else 0.0
 
-    print(f"\n── Δ (adversarial − original, same batch) ──────────────────────────")
+    print(f"\n  CAM cosine sim  : mean={mean_cos:.4f}  (lower = more explanation change)")
+    print(f"  Top-10% overlap : mean={mean_over:.4f}  (lower = more disagreement)")
+    print(f"  δ L∞ mean       : {mean_linf:.5f}")
+    print(f"  Pred preserved  : {sum(all_pred_pres)}/{n_done}")
+
+    print(f"\n── Δ (adversarial − original) ──────────────────────────────────────")
     for k in ("accuracy", "f1", "auc"):
-        orig_v = orig_atk_metrics[k]
-        adv_v  = adv_metrics[k]
-        print(f"  Δ{k:10s}: {adv_v - orig_v:+.4f}  ({orig_v:.4f} → {adv_v:.4f})")
+        ov, av = orig_atk_metrics[k], adv_metrics[k]
+        print(f"  Δ{k:10s}: {av - ov:+.4f}  ({ov:.4f} → {av:.4f})")
 
-    # ── 7. Save + TensorBoard ─────────────────────────────────────────────────
-    ckpt_tag = Path(args.checkpoint).stem if args.checkpoint else args.model_id.replace("/", "_")
-    import datetime
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    run_name = f"{args.model_type}_{ckpt_tag}_{args.split}_{ts}"
-    log_path = args.log_dir / run_name
-    log_path.mkdir(parents=True, exist_ok=True)
+    # ── Perceptual quality summary ─────────────────────────────────────────────
+    print("\n── Perceptual audio quality metrics (orig → adv) ───────────────────")
+    perceptual_means: dict[str, float] = {}
+    for key in ("pesq", "stoi", "visqol", "peaq", "zimtohrli"):
+        vals = [m[key] for m in all_audio_quality
+                if m.get(key) is not None
+                and not (isinstance(m[key], float) and np.isnan(m[key]))]
+        if vals:
+            print(f"  {key.upper():10s}: mean={np.mean(vals):.4f}  "
+                  f"[{min(vals):.3f} … {max(vals):.3f}]  n={len(vals)}")
+            perceptual_means[f"mean_{key}"] = float(np.mean(vals))
 
     atk_summary = {
-        "mean_cos_sim":        cos.mean().item(),
-        "top10_overlap":       over.mean().item(),
-        "delta_linf":          attack_result.delta.abs().max().item(),
-        "pred_preserved_frac": attack_result.prediction_preserved.float().mean().item(),
+        "mean_cos_sim":        mean_cos,
+        "top10_overlap":       mean_over,
+        "delta_linf":          mean_linf,
+        "pred_preserved_frac": pred_pres_frac,
     }
 
+    # ── Summary JSON ───────────────────────────────────────────────────────────
     summary: dict = {
         "run": {
-            "model_type":       args.model_type,
-            "model_id":         args.model_id if args.model_type == "sonics" else None,
-            "checkpoint":       str(args.checkpoint) if args.checkpoint else None,
-            "split":            args.split,
-            "clip_seconds":     args.clip_seconds,
-            "sample_rate":      sample_rate,
-            "n_attack_samples": args.n_attack_samples,
-            "n_steps":          args.n_steps,
+            "model_type":         args.model_type,
+            "model_id":           args.model_id if args.model_type == "sonics" else None,
+            "checkpoint":         str(args.checkpoint) if args.checkpoint else None,
+            "split":              args.split,
+            "clip_seconds":       args.clip_seconds,
+            "sample_rate":        sample_rate,
+            "n_attack_samples":   n_done,
+            "n_steps":            args.n_steps,
+            "lambda_aud":         args.lambda_aud,
+            "lambda_pred":        args.lambda_pred,
+            "pred_margin":        args.pred_margin,
+            "full_audio":         args.full_audio,
+            "window_hop_seconds": args.window_hop_seconds,
         },
         "original_metrics_atk_batch": orig_atk_metrics,
         "adversarial_metrics":        adv_metrics,
         "attack_summary":             atk_summary,
+        "perceptual_means":           perceptual_means,
     }
     out_json = log_path / "results.json"
     out_json.write_text(json.dumps(summary, indent=2))
     print(f"\nResults → {out_json}")
 
-    writer = SummaryWriter(log_dir=str(log_path))
-
+    # ── TensorBoard (aggregate) ────────────────────────────────────────────────
     def _metrics_md_table(metrics: dict, title: str) -> str:
-        rows = "\n".join(f"| {k} | {v:.4f} |" for k, v in metrics.items() if isinstance(v, float))
+        rows = "\n".join(f"| {k} | {v:.4f} |" for k, v in metrics.items()
+                         if isinstance(v, float))
         return f"**{title}**\n\n| Metric | Value |\n|--------|-------|\n{rows}"
 
     fig = _metrics_bar_figure(
         orig_atk_metrics, adv_metrics,
-        title=f"{args.model_type} — Classification metrics ({args.n_attack_samples} samples)",
+        title=f"{args.model_type} — Classification metrics ({n_done} samples)",
         xai_summary=atk_summary,
     )
     writer.add_figure("attack/metrics_comparison", fig, 0)
@@ -857,109 +1244,38 @@ def main() -> None:
                     _metrics_md_table(delta_metrics, "Δ (adversarial − original)"), 0)
     writer.add_text("metrics/attack_summary",
                     _metrics_md_table(atk_summary, "Attack summary"), 0)
-
-    for entry in attack_result.history:
-        s = entry["step"]
-        writer.add_scalar("loss/total",      entry["loss"],             s)
-        writer.add_scalar("loss/explain",    entry["loss_explain"],     s)
-        writer.add_scalar("loss/audibility", entry["loss_audibility"],  s)
-        writer.add_scalar("loss/pred",       entry["loss_pred"],        s)
-        writer.add_scalar("loss/cos_sim",    entry["cos_sim"],          s)
-
-    # Perceptual audio quality metrics (PESQ / STOI / ViSQOL / PEAQ / Zimtohrli)
-    adv_cpu   = attack_result.x_adv.cpu()
-    x_atk_cpu = x_atk.cpu()
-    print("\n── Perceptual audio quality metrics (orig → adv) ───────────────────")
-    audio_quality = _compute_psychoacoustic_metrics(x_atk_cpu, adv_cpu, sample_rate)
-    perceptual_means: dict[str, float] = {}
-    for key in ("pesq", "stoi", "visqol", "peaq", "zimtohrli"):
-        vals = [m[key] for m in audio_quality
-                if m.get(key) is not None and not np.isnan(m[key])]
-        if vals:
-            print(f"  {key.upper():10s}: mean={np.mean(vals):.4f}  "
-                  f"values={[f'{v:.3f}' for v in vals]}")
-            perceptual_means[f"mean_{key}"] = float(np.mean(vals))
     if perceptual_means:
         writer.add_text("metrics/perceptual",
                         _metrics_md_table(perceptual_means, "Perceptual quality (orig → adv)"), 0)
 
-    fig = _psychoacoustic_bar_figure(
-        audio_quality,
-        title=f"{args.model_type} — Perceptual Quality ({args.n_attack_samples} samples)",
-    )
-    writer.add_figure("attack/metrics_comparison_psychoacoustic", fig, 0)
-    plt.close(fig)
+    # Loss history — merge average across all samples, then log per step
+    if all_histories:
+        n_steps_hist = max(len(h) for h in all_histories)
+        merged_history: list[dict] = []
+        for s in range(n_steps_hist):
+            entries = [h[s] for h in all_histories if s < len(h)]
+            merged_history.append({
+                k: sum(e[k] for e in entries) / len(entries) for k in entries[0]
+            })
+        for entry in merged_history:
+            s = entry["step"]
+            writer.add_scalar("loss/total",      entry["loss"],            s)
+            writer.add_scalar("loss/explain",    entry["loss_explain"],    s)
+            writer.add_scalar("loss/audibility", entry["loss_audibility"], s)
+            writer.add_scalar("loss/pred",       entry["loss_pred"],       s)
+            writer.add_scalar("loss/cos_sim",    entry["cos_sim"],         s)
+        (log_path / "loss_history.json").write_text(json.dumps(merged_history, indent=2))
 
-    n_show = min(3, x_atk.shape[0])
-    delta_cpu = attack_result.delta.cpu()
-    for i in range(n_show):
-        stem = atk_paths[i].stem if i < len(atk_paths) else f"sample_{i:02d}"
-        writer.add_image(f"spectrogram/{stem}/original",
-                         _make_spectrogram_image(x_atk_cpu[i], sample_rate), 0)
-        writer.add_image(f"spectrogram/{stem}/adversarial",
-                         _make_spectrogram_image(adv_cpu[i], sample_rate), 0)
-        writer.add_image(f"spectrogram/{stem}/delta",
-                         _make_spectrogram_image(delta_cpu[i], sample_rate), 0)
-        writer.add_audio(f"audio/{stem}/original",
-                         x_atk_cpu[i].unsqueeze(0), sample_rate=sample_rate)
-        writer.add_audio(f"audio/{stem}/adversarial",
-                         adv_cpu[i].unsqueeze(0), sample_rate=sample_rate)
-
-    # Save artifacts to disk
-    audio_dir   = log_path / "audio"
-    heatmap_dir = log_path / "heatmaps"
-    images_dir  = log_path / "images"
-
-    preds_orig_list = preds_orig_atk.cpu().tolist()
-    preds_adv_list  = preds_adv.cpu().tolist()
-
-    n_atk = x_atk.shape[0]
-    print(f"\nSaving attack artifacts → {log_path}")
-    for i in range(n_atk):
-        stem  = atk_paths[i].stem if i < len(atk_paths) else f"sample_{i:02d}"
-        label = gt_attack[i].item()
-
-        sample_audio_dir = audio_dir / stem
-        sample_audio_dir.mkdir(parents=True, exist_ok=True)
-        torchaudio.save(str(sample_audio_dir / "original.wav"),
-                        x_atk_cpu[i].unsqueeze(0), sample_rate)
-        torchaudio.save(str(sample_audio_dir / "adversarial.wav"),
-                        adv_cpu[i].unsqueeze(0), sample_rate)
-        torchaudio.save(str(sample_audio_dir / "delta.wav"),
-                        delta_cpu[i].unsqueeze(0), sample_rate)
-
-        sample_heatmap_dir = heatmap_dir / stem
-        sample_heatmap_dir.mkdir(parents=True, exist_ok=True)
-        cam_orig_np = attack_result.cam_original[i].cpu().numpy()
-        cam_adv_np  = attack_result.cam_adv[i].cpu().numpy()
-        np.save(str(sample_heatmap_dir / "original.npy"),    cam_orig_np)
-        np.save(str(sample_heatmap_dir / "adversarial.npy"), cam_adv_np)
-
-        _save_sample_images(
-            sample_dir  = images_dir / stem,
-            orig_wav    = x_atk_cpu[i],
-            adv_wav     = adv_cpu[i],
-            delta_wav   = delta_cpu[i],
-            cam_orig    = cam_orig_np,
-            cam_adv     = cam_adv_np,
-            sample_rate = sample_rate,
-            stem        = stem,
-            label       = label,
-            pred_orig   = preds_orig_list[i],
-            pred_adv    = preds_adv_list[i],
+    if all_audio_quality:
+        fig = _psychoacoustic_bar_figure(
+            all_audio_quality,
+            title=f"{args.model_type} — Perceptual Quality ({n_done} samples)",
         )
-
-    (log_path / "loss_history.json").write_text(
-        json.dumps(attack_result.history, indent=2)
-    )
-
-    print(f"  audio/        → {n_atk} subdirs, 3 wav files each")
-    print(f"  heatmaps/     → {n_atk} subdirs, 2 npy files each")
-    print(f"  images/       → {n_atk} subdirs, 7 png files + panel each")
-    print(f"  loss_history.json")
+        writer.add_figure("attack/metrics_comparison_psychoacoustic", fig, 0)
+        plt.close(fig)
 
     writer.close()
-    print(f"TensorBoard → {log_path}")
+    print(f"\nTensorBoard → {log_path}")
     print(f"  tensorboard --logdir {args.log_dir}")
 
 

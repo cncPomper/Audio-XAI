@@ -20,9 +20,23 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from audio_xai.models.base import AudioClassifier
+
+
+def _disable_inplace_ops(model: nn.Module) -> None:
+    """Set inplace=False on all ReLU / ReLU6 modules in the model.
+
+    In-place activations corrupt backward-hook views during Grad-CAM backprop,
+    raising 'Output N of BackwardHookFunctionBackward is a view and is being
+    modified inplace'. Disabling them globally is safe — it does not affect
+    weights or predictions.
+    """
+    for module in model.modules():
+        if isinstance(module, (nn.ReLU, nn.ReLU6)):
+            module.inplace = False
 
 
 class GradCAMBase(ABC):
@@ -34,6 +48,7 @@ class GradCAMBase(ABC):
 
     def __init__(self, model: AudioClassifier):
         self.model = model
+        _disable_inplace_ops(model)
         self._activations: torch.Tensor | None = None
         self._gradients: torch.Tensor | None = None
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
@@ -87,21 +102,35 @@ class GradCAMBase(ABC):
 
         logits = self.model(waveform)
         if target_class is None:
-            target_class = logits.argmax(dim=-1)
+            if logits.shape[1] == 1:
+                target_class = (logits.squeeze(1) >= 0).long()
+            else:
+                target_class = logits.argmax(dim=-1)
         if isinstance(target_class, int):
             target_class = torch.tensor([target_class] * waveform.shape[0], device=waveform.device)
 
         # Score = logit of target class, summed over batch.
-        score = logits.gather(1, target_class.view(-1, 1)).sum()
+        if logits.shape[1] == 1:
+            # Sigmoid binary: +logit for fake (target=1), -logit for real (target=0).
+            sign = torch.where(
+                target_class == 1,
+                torch.ones(logits.shape[0], device=logits.device, dtype=logits.dtype),
+                -torch.ones(logits.shape[0], device=logits.device, dtype=logits.dtype),
+            )
+            score = (sign * logits.squeeze(1)).sum()
+        else:
+            score = logits.gather(1, target_class.view(-1, 1)).sum()
 
         # The model's gradients w.r.t. its target layer's activations.
-        # retain_graph=True so the caller can still backprop the heatmap loss.
+        # retain_graph mirrors create_graph: when building a second-order graph
+        # the forward graph must stay alive; when detaching (create_graph=False)
+        # freeing it immediately saves significant GPU memory.
         assert self._activations is not None, "Forward hook did not fire — check target_layer"
         grads = torch.autograd.grad(
             score,
             self._activations,
             create_graph=create_graph,
-            retain_graph=True,
+            retain_graph=create_graph,
         )[0]
 
         heatmap = self._build_heatmap(self._activations, grads)
@@ -130,12 +159,12 @@ class TransformerGradCAM(GradCAMBase):
         model: AudioClassifier,
         num_special_tokens: int = 2,
         freq_patches: int = 12,
-        time_patches: int = 101,
+        time_patches: int | None = 101,
     ):
         super().__init__(model)
         self.num_special = num_special_tokens
         self.freq_patches = freq_patches
-        self.time_patches = time_patches
+        self.time_patches = time_patches  # None → inferred from token count
 
     def _build_heatmap(self, activations: torch.Tensor, gradients: torch.Tensor) -> torch.Tensor:
         # Drop CLS / distillation tokens.
@@ -143,6 +172,9 @@ class TransformerGradCAM(GradCAMBase):
         g = gradients[:, self.num_special :, :]
 
         B, N, D = a.shape
+        # Infer time_patches if not set (e.g. SpecTra / variable-length input).
+        if self.time_patches is None:
+            self.time_patches = N // self.freq_patches
         expected = self.freq_patches * self.time_patches
         if N != expected:
             # Fall back to inferring a square-ish grid if the user's AST
@@ -170,4 +202,13 @@ def make_gradcam(model: AudioClassifier) -> GradCAMBase:
         return CNNGradCAM(model)
     if cls_name == "ASTBinary":
         return TransformerGradCAM(model)
+    if cls_name == "Wav2Vec2Binary":
+        # Wav2Vec2 Transformer encoder — last layer's LayerNorm output is
+        # [B, T', D]; we treat T' as the "time" axis and return [B, 1, T'].
+        return TransformerGradCAM(
+            model,
+            num_special_tokens=0,  # Wav2Vec2 has no CLS token
+            freq_patches=1,        # 1-D time sequence; "freq" dim = 1
+            time_patches=None,     # inferred at call time from T'
+        )
     raise ValueError(f"No Grad-CAM variant registered for {cls_name}")
