@@ -17,9 +17,9 @@ import torch
 import torchaudio
 from audio_xai.fetching_and_metrics.peaq_implementation import peaq_like
 from pymcd.mcd import Calculate_MCD
-from pystoi import stoi
 from scipy.stats import entropy
 from torchmetrics.audio.pesq import PerceptualEvaluationSpeechQuality
+from torchmetrics.audio.stoi import ShortTimeObjectiveIntelligibility
 from zimtohrli import mos_from_signals
 
 # ---------------------------------------------------------------------------
@@ -189,30 +189,23 @@ def compute_pesq(
 
 
 def compute_stoi(
-    y_a: np.ndarray,
-    y_b: np.ndarray,
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
     sr: int = PESQ_SR,
     extended: bool = False,
 ) -> float:
-    """STOI averaged over 8-s chunks.
+    """STOI averaged over 8-s chunks using torchmetrics.
 
-    Expects 1-D arrays at PESQ_SR.
+    Expects 1-D tensors at PESQ_SR.  tensor_a is the reference (original),
+    tensor_b is the test signal (adversarial / degraded).
     """
-    T = min(len(y_a), len(y_b))
-    a, b = y_a[:T], y_b[:T]
+    stoi_fn = ShortTimeObjectiveIntelligibility(fs=sr, extended=extended)
+    a = tensor_a.squeeze()
+    b = tensor_b.squeeze()
     scores = []
-    if T < PESQ_CHUNK_SIZE:
-        scores.append(stoi(a, b, sr, extended=extended))
-    else:
-        for start in range(0, T - PESQ_CHUNK_SIZE + 1, PESQ_CHUNK_SIZE):
-            scores.append(
-                stoi(
-                    a[start : start + PESQ_CHUNK_SIZE],
-                    b[start : start + PESQ_CHUNK_SIZE],
-                    sr,
-                    extended=extended,
-                )
-            )
+    for ca, cb in _iter_chunks(a, b, PESQ_CHUNK_SIZE):
+        with torch.no_grad():
+            scores.append(float(stoi_fn(cb, ca).item()))
     return float(np.mean(scores)) if scores else 0.0
 
 
@@ -386,7 +379,9 @@ if __name__ == "__main__":
         print(f" -> PESQ WB:                 {pesq_score:.4f}")
 
         t0 = time.time()
-        stoi_score = compute_stoi(y_real_pesq, y_fake_pesq)
+        stoi_score = compute_stoi(
+            torch.tensor(y_real_pesq), torch.tensor(y_fake_pesq),
+        )
         times["stoi"].append(time.time() - t0)
         results["stoi"].append(stoi_score)
         print(f" -> STOI:                    {stoi_score:.4f}")
@@ -453,7 +448,9 @@ if __name__ == "__main__":
         print(f" -> PEAQ-like ODG (fake vs pert): {peaq_score:.4f}")
 
         t0 = time.time()
-        stoi_pert = compute_stoi(y_fake_pesq, y_perturbed_pesq)
+        stoi_pert = compute_stoi(
+            torch.tensor(y_fake_pesq), torch.tensor(y_perturbed_pesq),
+        )
         times["stoi_pert"].append(time.time() - t0)
         results["stoi_pert"].append(stoi_pert)
         print(f" -> STOI (fake vs pert): {stoi_pert:.4f}")
