@@ -5,6 +5,7 @@ Reports the standard deepfake-audio metrics: accuracy, AUROC, EER. EER is the co
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,31 +22,26 @@ from audio_xai.models.base import AudioClassifier
 
 
 def equal_error_rate(scores: torch.Tensor, labels: torch.Tensor) -> float:
-    """Compute the Equal Error Rate (EER) for binary classification scores and labels.
+    """Compute EER via a single vectorized sort — O(N log N) instead of O(N·T).
 
-    Parameters:
-        scores (torch.Tensor): Per-sample model scores for the positive class.
-        labels (torch.Tensor): Binary ground-truth labels (0 for negative, 1 for positive).
-
-    Returns:
-        float: EER value between 0 and 1 — the average of the false acceptance rate (FAR)
-        and false rejection rate (FRR) at the threshold where |FAR − FRR| is minimized.
+    Sorts samples by descending score and sweeps actual score values as
+    thresholds, which is both faster and more accurate than a fixed grid.
     """
-    scores = scores.detach().cpu()
-    labels = labels.detach().cpu()
-    thresholds = torch.linspace(scores.min(), scores.max(), steps=1000)
-    fars, frrs = [], []
-    pos = labels == 1
-    neg = labels == 0
-    for t in thresholds:
-        far = ((scores[neg] >= t).float().mean()).item() if neg.any() else 0.0
-        frr = ((scores[pos] < t).float().mean()).item() if pos.any() else 0.0
-        fars.append(far)
-        frrs.append(frr)
-    fars_t = torch.tensor(fars)
-    frrs_t = torch.tensor(frrs)
-    idx = (fars_t - frrs_t).abs().argmin()
-    return ((fars_t[idx] + frrs_t[idx]) / 2).item()
+    s = scores.detach().float().cpu().numpy()
+    l = labels.detach().cpu().numpy().astype(np.int32)
+    n_pos = l.sum()
+    n_neg = len(l) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    order        = np.argsort(-s)
+    l_sorted     = l[order]
+    tps          = np.cumsum(l_sorted)
+    fps          = np.cumsum(1 - l_sorted)
+    frr          = 1.0 - tps / n_pos   # miss rate
+    far          = fps / n_neg          # false alarm rate
+    idx          = np.argmin(np.abs(far - frr))
+    return float((far[idx] + frr[idx]) / 2)
 
 
 class RealFakeLitModule(LightningModule):
