@@ -52,7 +52,12 @@ from tqdm import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from lightning.pytorch import LightningModule, Trainer
+from lightning.pytorch.callbacks import DeviceStatsMonitor
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.plugins.environments import SLURMEnvironment
 
 from audio_xai.attacks.perceptual_xai_attack import (
     AttackConfig, AttackResult, perceptual_xai_attack, topk_overlap,
@@ -212,18 +217,27 @@ def load_split(data_root: Path, split: str | None,
 
 
 def load_waveform(path: Path, sample_rate: int, clip_len: int) -> torch.Tensor:
-    y, _ = librosa.load(str(path), sr=sample_rate, mono=True)
-    if len(y) < clip_len:
-        y = np.pad(y, (0, clip_len - len(y)))
+    wav, sr = torchaudio.load(str(path))
+    if wav.shape[0] > 1:
+        wav = wav.mean(0, keepdim=True)
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    wav = wav.squeeze(0)
+    if wav.shape[0] < clip_len:
+        wav = torch.nn.functional.pad(wav, (0, clip_len - wav.shape[0]))
     else:
-        y = y[:clip_len]
-    return torch.from_numpy(y)
+        wav = wav[:clip_len]
+    return wav
 
 
 def load_full_waveform(path: Path, sample_rate: int) -> torch.Tensor:
     """Load the entire audio file without any length clipping. Returns 1-D tensor [T]."""
-    y, _ = librosa.load(str(path), sr=sample_rate, mono=True)
-    return torch.from_numpy(y)
+    wav, sr = torchaudio.load(str(path))
+    if wav.shape[0] > 1:
+        wav = wav.mean(0, keepdim=True)
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    return wav.squeeze(0)
 
 
 def _select_balanced_batch(
@@ -270,6 +284,26 @@ def load_balanced_batch(
     x = torch.stack(waveforms).to(device)
     gt = torch.tensor(labels, dtype=torch.long)
     return x, gt, paths
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+
+class AudioPathDataset(Dataset):
+    """Yields (path_str, label) pairs without loading audio.
+
+    Audio loading happens inside AttackModule.predict_step so each sample is
+    processed and freed independently, preventing cross-sample GPU memory growth.
+    """
+
+    def __init__(self, paths: list[Path], labels: list[int]) -> None:
+        self.paths  = paths
+        self.labels = labels
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, idx: int) -> tuple[str, int]:
+        return str(self.paths[idx]), self.labels[idx]
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
@@ -363,14 +397,22 @@ def _run_attack_chunked(
             chunk = chunk.to(device)
         gradcam = _make_gradcam(model_type, attack_model)
         result = perceptual_xai_attack(attack_model, chunk, cfg, gradcam=gradcam)
-        parts_x_adv.append(result.x_adv.cpu())
-        parts_delta.append(result.delta.cpu())
-        parts_cam_orig.append(result.cam_original.cpu())
-        parts_cam_adv.append(result.cam_adv.cpu())
-        parts_cos_sim.append(result.cosine_similarity.cpu())
-        parts_pred_pres.append(result.prediction_preserved.cpu())
+        # .detach() BEFORE .cpu(): with torch.enable_grad() active, calling
+        # .cpu() on a requires_grad tensor creates a CopyBackwards grad_fn that
+        # holds a reference to the GPU tensor, preventing it from being freed
+        # even after `del result`. Detaching severs the autograd link first.
+        parts_x_adv.append(result.x_adv.detach().cpu())
+        parts_delta.append(result.delta.detach().cpu())
+        parts_cam_orig.append(result.cam_original.detach().cpu())
+        parts_cam_adv.append(result.cam_adv.detach().cpu())
+        parts_cos_sim.append(result.cosine_similarity.detach().cpu())
+        parts_pred_pres.append(result.prediction_preserved.detach().cpu())
         history_chunks.append(result.history)
         del result, gradcam, chunk
+        # Free model parameter .grad buffers populated by the second-order
+        # GradCAM backward; set_to_none=True releases the storage entirely
+        # rather than zeroing the existing buffer.
+        attack_model.zero_grad(set_to_none=True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -492,13 +534,14 @@ def _attack_full_audio_sample(
 # ── TensorBoard helpers ───────────────────────────────────────────────────────
 
 def _make_spectrogram_image(wav: torch.Tensor, sample_rate: int,
-                             max_seconds: float = 10.0,
+                             max_seconds: float | None = 10.0,
                              cmap: str = "inferno") -> torch.Tensor:
     """Return [3, n_mels, T] RGB float tensor in [0, 1] suitable for add_image."""
-    max_samples = int(max_seconds * sample_rate)
     y = wav.cpu().numpy()
-    if y.shape[-1] > max_samples:
-        y = y[..., :max_samples]
+    if max_seconds is not None:
+        max_samples = int(max_seconds * sample_rate)
+        if y.shape[-1] > max_samples:
+            y = y[..., :max_samples]
 
     mel = librosa.feature.melspectrogram(y=y, sr=sample_rate, n_fft=1024, hop_length=256, n_mels=80)
     mel_db = librosa.power_to_db(mel, ref=np.max, top_db=80.0)
@@ -591,7 +634,7 @@ def _save_sample_images(
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     def _spec_hwc(wav: torch.Tensor) -> np.ndarray:
-        return _make_spectrogram_image(wav, sample_rate).permute(1, 2, 0).numpy()
+        return _make_spectrogram_image(wav, sample_rate, max_seconds=None).permute(1, 2, 0).numpy()
 
     def _cam_hwc(cam: np.ndarray, ref_shape: tuple) -> np.ndarray:
         if cam.ndim == 1:
@@ -654,8 +697,6 @@ def _psychoacoustic_one(
         adv_16k  = torchaudio.functional.resample(adv,  sample_rate, PESQ_SR)
     else:
         orig_16k, adv_16k = orig, adv
-    orig_np = orig_16k.numpy()
-    adv_np  = adv_16k.numpy()
 
     try:
         import warnings
@@ -667,7 +708,7 @@ def _psychoacoustic_one(
         print(f"  [warn] PESQ [{i}]: {e}")
 
     try:
-        m["stoi"] = round(compute_stoi(orig_np, adv_np, sr=PESQ_SR), 6)
+        m["stoi"] = round(compute_stoi(orig_16k, adv_16k, sr=PESQ_SR), 6)
     except Exception as e:
         m["stoi"] = None
         print(f"  [warn] STOI [{i}]: {e}")
@@ -677,7 +718,9 @@ def _psychoacoustic_one(
         api = VisqolApi()
         api.create(mode="speech")
         result = api.measure_from_arrays(
-            orig_np.astype(np.float64), adv_np.astype(np.float64), sample_rate=PESQ_SR,
+            orig_16k.numpy().astype(np.float64),
+            adv_16k.numpy().astype(np.float64),
+            sample_rate=PESQ_SR,
         )
         m["visqol"] = round(float(result.moslqo), 6)
     except Exception as e:
@@ -781,6 +824,283 @@ def _psychoacoustic_bar_figure(audio_metrics: list[dict], title: str = "") -> pl
     return fig
 
 
+# ── Lightning attack module ───────────────────────────────────────────────────
+
+class AttackModule(LightningModule):
+    """LightningModule wrapper around the per-sample perceptual XAI attack.
+
+    Used exclusively with Trainer.predict().  Each predict_step processes one
+    audio file: load → attack → GradCAM → psychoacoustics → save artifacts →
+    return metrics dict.  Memory is explicitly freed in the finally block before
+    the next sample.
+    """
+
+    def __init__(
+        self,
+        args,
+        infer_model:  torch.nn.Module,
+        attack_model: torch.nn.Module,
+        sample_rate:  int,
+        cfg:          AttackConfig,
+        clip_len:     int,
+        hop_len:      int,
+        sw_micro_bs:  int,
+        log_path:     Path,
+    ) -> None:
+        super().__init__()
+        self.args         = args
+        self.infer_model  = infer_model
+        self.attack_model = attack_model
+        self.sample_rate  = sample_rate
+        self.cfg          = cfg
+        self.clip_len     = clip_len
+        self.hop_len      = hop_len
+        self.sw_micro_bs  = sw_micro_bs
+        self.log_path     = log_path
+        self.audio_dir    = log_path / "audio"
+
+    # Lightning wraps predict_step in torch.no_grad() even when
+    # inference_mode=False.  GradCAM needs real gradients, so we
+    # re-enable gradient tracking for the entire step via this decorator.
+    @torch.enable_grad()
+    def predict_step(self, batch, batch_idx: int) -> dict:
+        path_strs, labels_t = batch
+        path      = Path(path_strs[0])
+        label     = int(labels_t[0].item())
+        index_var = batch_idx   # progress tracker: which sample we are attacking
+        dev       = str(self.device)
+
+        _gpu_used = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+        print(f"\n{'='*60}")
+        print(f"  [index_var={index_var}] {path.name}  "
+              f"(label={'real' if label==0 else 'fake'})  GPU: {_gpu_used:.2f} GiB")
+        print(f"{'='*60}")
+
+        max_oom_retries = getattr(self.args, 'oom_retries', 3)
+        result: dict = {"index": index_var, "stem": path.stem, "label": label, "ok": False}
+
+        for oom_attempt in range(max_oom_retries):
+            if oom_attempt > 0:
+                _gpu_now = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                print(f"\n  [RETRY {oom_attempt}/{max_oom_retries - 1}] "
+                      f"index_var={index_var}  GPU now: {_gpu_now:.2f} GiB")
+
+            x_single = x_clip = x_adv_clip = None
+            x_adv_full = delta_full = delta_clip = None
+            orig_cpu = adv_cpu = orig_save = adv_save = dlt_save = None
+            pred_orig = prob_orig = pred_adv = prob_adv = None
+            cos_sim_t = pred_pres_t = None
+            cam_orig_np: np.ndarray | None = None
+            cam_adv_np:  np.ndarray | None = None
+            history: list[dict] = []
+
+            try:
+                if self.args.full_audio:
+                    x_single = load_full_waveform(path, self.sample_rate)
+                else:
+                    x_single = load_waveform(path, self.sample_rate, self.clip_len)
+
+                x_clip = x_single[:self.clip_len].unsqueeze(0).to(dev)
+                pred_orig, prob_orig = predict_batch(self.infer_model, x_clip)
+
+                if self.args.full_audio:
+                    x_adv_full, delta_full, win_result = _attack_full_audio_sample(
+                        self.args.model_type, self.attack_model, x_single, self.cfg,
+                        self.clip_len, self.hop_len, self.sw_micro_bs, dev,
+                    )
+                    x_adv_clip  = x_adv_full[:self.clip_len].unsqueeze(0).to(dev)
+                    cos_sim_t   = win_result.cosine_similarity
+                    pred_pres_t = win_result.prediction_preserved
+                    history     = win_result.history
+                    # Aggregate all N windows by concatenating along the time axis.
+                    # win_result.cam_original shape: [N, T_tokens] (1-D CAM per window)
+                    # or [N, F, T_tokens] (2-D feature-map CAM).
+                    _c_o = win_result.cam_original.detach().cpu().numpy()
+                    _c_a = win_result.cam_adv.detach().cpu().numpy()
+                    if _c_o.ndim == 2:          # [N, T] → [N*T]
+                        cam_orig_np = _c_o.reshape(-1)
+                        cam_adv_np  = _c_a.reshape(-1)
+                    else:                       # [N, F, T] → [F, N*T]
+                        cam_orig_np = np.concatenate(list(_c_o), axis=-1)
+                        cam_adv_np  = np.concatenate(list(_c_a), axis=-1)
+                    del win_result, _c_o, _c_a
+                else:
+                    gradcam = _make_gradcam(self.args.model_type, self.attack_model)
+                    res     = perceptual_xai_attack(self.attack_model, x_clip, self.cfg, gradcam=gradcam)
+                    x_adv_clip  = res.x_adv
+                    delta_clip  = res.delta.squeeze(0).detach().cpu()
+                    cos_sim_t   = res.cosine_similarity
+                    pred_pres_t = res.prediction_preserved
+                    history     = res.history
+                    cam_orig_np = res.cam_original[0].detach().cpu().numpy()
+                    cam_adv_np  = res.cam_adv[0].detach().cpu().numpy()
+                    del res, gradcam
+
+                pred_adv, prob_adv = predict_batch(self.infer_model, x_adv_clip)
+
+                orig_cpu  = x_clip.squeeze(0).detach().cpu()
+                adv_cpu   = x_adv_clip.squeeze(0).detach().cpu()
+                cos_mean  = float(cos_sim_t.mean().item())
+                pred_pres = int(pred_pres_t.all().item())
+
+                if self.args.full_audio:
+                    delta_linf = float(delta_full.abs().max().item())
+                    orig_save  = x_single.detach().cpu()
+                    adv_save   = x_adv_full.detach().cpu()
+                    dlt_save   = delta_full.detach().cpu()
+                else:
+                    delta_linf = float(delta_clip.abs().max().item())
+                    orig_save  = orig_cpu
+                    adv_save   = adv_cpu
+                    dlt_save   = delta_clip
+
+                if cam_orig_np is not None:
+                    cam_o_t  = torch.from_numpy(cam_orig_np).unsqueeze(0)
+                    cam_a_t  = torch.from_numpy(cam_adv_np).unsqueeze(0)
+                    over_val = float(topk_overlap(cam_o_t, cam_a_t, k_frac=0.1).item())
+                else:
+                    over_val = 0.0
+
+                print("  Computing perceptual metrics...")
+                psy = _psychoacoustic_one(index_var, orig_cpu, adv_cpu, self.sample_rate)
+                psy_str = "  ".join(
+                    f"{k.upper()}={v:.3f}" for k, v in psy.items() if v is not None
+                )
+                print(f"  {psy_str}")
+
+                sample_metrics = {
+                    "index":          index_var,
+                    "stem":           path.stem,
+                    "label":          label,
+                    "label_str":      "real" if label == 0 else "fake",
+                    "pred_orig":      int(pred_orig.item()),
+                    "prob_orig":      round(float(prob_orig.item()), 6),
+                    "pred_adv":       int(pred_adv.item()),
+                    "prob_adv":       round(float(prob_adv.item()), 6),
+                    "correct_orig":   int(pred_orig.item() == label),
+                    "correct_adv":    int(pred_adv.item() == label),
+                    "pred_preserved": pred_pres,
+                    "cos_sim":        round(cos_mean, 6),
+                    "top10_overlap":  round(over_val, 6),
+                    "delta_linf":     round(delta_linf, 6),
+                    **{k: (round(v, 6) if isinstance(v, float) else v)
+                       for k, v in psy.items()},
+                    "ok": True,
+                }
+
+                sample_json = self.log_path / f"sample_{index_var:04d}_{path.stem}.json"
+                sample_json.write_text(json.dumps(sample_metrics, indent=2))
+                print(f"  Saved metrics → {sample_json.name}")
+
+                sample_audio_dir = self.audio_dir / path.stem
+                sample_audio_dir.mkdir(parents=True, exist_ok=True)
+                torchaudio.save(str(sample_audio_dir / "original.wav"),
+                                orig_save.unsqueeze(0), self.sample_rate)
+                torchaudio.save(str(sample_audio_dir / "adversarial.wav"),
+                                adv_save.unsqueeze(0), self.sample_rate)
+                torchaudio.save(str(sample_audio_dir / "delta.wav"),
+                                dlt_save.unsqueeze(0), self.sample_rate)
+                print(f"  Saved audio   → {sample_audio_dir}")
+
+                tb = self.logger.experiment
+                tb.add_image(f"spectrogram/{path.stem}/original",
+                             _make_spectrogram_image(orig_cpu, self.sample_rate), 0)
+                tb.add_image(f"spectrogram/{path.stem}/adversarial",
+                             _make_spectrogram_image(adv_cpu, self.sample_rate), 0)
+                tb.add_image(f"spectrogram/{path.stem}/delta",
+                             _make_spectrogram_image(dlt_save[:self.clip_len], self.sample_rate), 0)
+                if index_var < 10:
+                    tb.add_audio(f"audio/{path.stem}/original",
+                                 orig_cpu.unsqueeze(0), sample_rate=self.sample_rate)
+                    tb.add_audio(f"audio/{path.stem}/adversarial",
+                                 adv_cpu.unsqueeze(0), sample_rate=self.sample_rate)
+
+                if cam_orig_np is not None:
+                    hmap_dir = self.log_path / "heatmaps" / path.stem
+                    hmap_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(str(hmap_dir / "original.npy"),    cam_orig_np)
+                    np.save(str(hmap_dir / "adversarial.npy"), cam_adv_np)
+                    _save_sample_images(
+                        sample_dir  = self.log_path / "images" / path.stem,
+                        orig_wav    = orig_save if self.args.full_audio else orig_cpu,
+                        adv_wav     = adv_save  if self.args.full_audio else adv_cpu,
+                        delta_wav   = dlt_save,
+                        cam_orig    = cam_orig_np,
+                        cam_adv     = cam_adv_np,
+                        sample_rate = self.sample_rate,
+                        stem        = path.stem,
+                        label       = label,
+                        pred_orig   = int(pred_orig.item()),
+                        pred_adv    = int(pred_adv.item()),
+                    )
+
+                result = {**sample_metrics, "history": history}
+                break  # ── success: exit OOM retry loop ──────────────────────
+
+            except torch.cuda.OutOfMemoryError as oom_e:
+                print(f"\n  [OOM] index_var={index_var}, "
+                      f"attempt {oom_attempt + 1}/{max_oom_retries}: {oom_e}")
+
+            except Exception as exc:
+                import traceback as _tb
+                print(f"  [ERROR] index_var={index_var} ({path.name}): {exc}")
+                _tb.print_exc()
+                break  # non-OOM errors: skip retries
+
+            finally:
+                # Runs on every attempt (success, OOM, or other error) before
+                # the loop body continues or exits — ensures GPU is always freed.
+                x_single    = None
+                x_clip      = None
+                x_adv_clip  = None
+                x_adv_full  = None
+                delta_full  = None
+                delta_clip  = None
+                orig_cpu    = None
+                adv_cpu     = None
+                orig_save   = None
+                adv_save    = None
+                dlt_save    = None
+                pred_orig   = None
+                prob_orig   = None
+                pred_adv    = None
+                prob_adv    = None
+                cos_sim_t   = None
+                pred_pres_t = None
+                cam_orig_np = None
+                cam_adv_np  = None
+                self.attack_model.zero_grad(set_to_none=True)
+                gc.collect()
+                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+            # ── reached only after OOM (success/non-OOM both use break) ─────
+            if oom_attempt < max_oom_retries - 1:
+                _wait = 2 * (oom_attempt + 1)
+                print(f"  Waiting {_wait}s before retry...")
+                time.sleep(_wait)
+            else:
+                print(f"  [OOM] All {max_oom_retries} attempts exhausted for "
+                      f"index_var={index_var} — skipping sample")
+
+        # GPU stats logged AFTER cleanup so the numbers reflect actual freed state.
+        # DeviceStatsMonitor only fires on training hooks, so we log manually.
+        if torch.cuda.is_available():
+            tb = self.logger.experiment
+            mem_alloc = torch.cuda.memory_allocated() / 1e9
+            mem_res   = torch.cuda.memory_reserved()  / 1e9
+            mem_peak  = torch.cuda.max_memory_allocated() / 1e9
+            tb.add_scalar("gpu/memory_allocated_GiB", mem_alloc, index_var)
+            tb.add_scalar("gpu/memory_reserved_GiB",  mem_res,   index_var)
+            tb.add_scalar("gpu/memory_peak_GiB",      mem_peak,  index_var)
+            torch.cuda.reset_peak_memory_stats()
+            print(f"  GPU post-cleanup: allocated={mem_alloc:.2f} GiB  "
+                  f"reserved={mem_res:.2f} GiB  peak={mem_peak:.2f} GiB")
+
+        return result
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -825,6 +1145,9 @@ def main() -> None:
                    help="Hinge margin for prediction-preserving loss. "
                         "Lower values (e.g. 0.0) activate the penalty earlier "
                         "and leave less room for prediction flips.")
+    p.add_argument("--oom-retries",      type=int, default=3,
+                   help="Max GPU OOM retries per sample before skipping it. "
+                        "On each retry GPU memory is fully freed and re-allocated.")
 
     # Sliding-window full-audio mode
     p.add_argument("--full-audio",       action="store_true", default=False,
@@ -838,7 +1161,16 @@ def main() -> None:
                         "Set smaller (e.g. half of clip_seconds) for 50%% overlap "
                         "with Hann-window blending at boundaries.")
 
+    # Batching: split n_attack_samples into N equal chunks and process one per run
+    p.add_argument("--n-batches",    type=int, default=1,
+                   help="Total number of batches the sample list is divided into.")
+    p.add_argument("--batch-index",  type=int, default=0,
+                   help="0-based index of the batch to process in this run.")
+
     # Output
+    p.add_argument("--run-name", default=None,
+                   help="Override the auto-generated TensorBoard run name. "
+                        "Set the same value for all batches to write into one directory.")
     p.add_argument("--log-dir", type=Path, default=Path("runs/attack"))
     p.add_argument("--device",  default="cuda" if torch.cuda.is_available() else "cpu")
 
@@ -878,21 +1210,60 @@ def main() -> None:
     atk_paths, gt_labels_list = _select_balanced_batch(
         samples, args.n_attack_samples, seed=args.seed
     )
+
+    if args.n_batches > 1:
+        per_batch = len(atk_paths) // args.n_batches
+        start = args.batch_index * per_batch
+        end   = start + per_batch if args.batch_index < args.n_batches - 1 else len(atk_paths)
+        atk_paths      = atk_paths[start:end]
+        gt_labels_list = gt_labels_list[start:end]
+        print(f"Batch {args.batch_index + 1}/{args.n_batches}: "
+              f"samples [{start}, {end}) of {args.n_attack_samples}")
+
     n_sel_real = sum(1 for l in gt_labels_list if l == 0)
     n_sel_fake = sum(1 for l in gt_labels_list if l == 1)
     print(f"Selected {len(atk_paths)} samples  ({n_sel_real} real, {n_sel_fake} fake)")
 
-    # ── Setup output paths + TensorBoard writer ───────────────────────────────
+    # ── 4. Setup paths + Lightning TensorBoard logger ─────────────────────────
     ckpt_tag = Path(args.checkpoint).stem if args.checkpoint else args.model_id.replace("/", "_")
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    run_name = f"{args.model_type}_{ckpt_tag}_{args.split}_{ts}"
-    log_path = args.log_dir / run_name
+    run_name = args.run_name or f"{args.model_type}_{ckpt_tag}_{args.split}_{ts}"
+
+    tb_logger = TensorBoardLogger(
+        save_dir=str(args.log_dir),
+        name=run_name,
+        version="",
+    )
+    log_path = Path(tb_logger.log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
-    audio_dir = log_path / "audio"
 
-    writer = SummaryWriter(log_dir=str(log_path))
+    # ── 4b. Resume: skip already-processed samples ────────────────────────────
+    audio_out_dir = log_path / "audio"
+    done_stems = {
+        p.parent.name
+        for p in audio_out_dir.glob("*/adversarial.wav")
+    } if audio_out_dir.exists() else set()
 
-    # ── Attack config ──────────────────────────────────────────────────────────
+    if done_stems:
+        before = len(atk_paths)
+        filtered = [(p, l) for p, l in zip(atk_paths, gt_labels_list)
+                    if Path(p).stem not in done_stems]
+        atk_paths, gt_labels_list = (map(list, zip(*filtered)) if filtered
+                                     else ([], []))
+        skipped = before - len(atk_paths)
+        print(f"\nResume: {skipped}/{before} already done, {len(atk_paths)} remaining")
+        for stem in sorted(done_stems):
+            print(f"  [done]  {stem}")
+        for p in atk_paths:
+            print(f"  [todo]  {Path(p).stem}")
+    else:
+        print(f"\nResume: no prior output found — processing all {len(atk_paths)} samples")
+
+    if not atk_paths:
+        print("All samples already processed — nothing to do.")
+        return
+
+    # ── 5. Attack config ───────────────────────────────────────────────────────
     cfg = AttackConfig(
         n_steps=args.n_steps,
         lr=args.lr,
@@ -906,7 +1277,7 @@ def main() -> None:
     # Full-audio mode MUST use 1 window at a time: the YAML micro_batch (e.g. 16)
     # was meant for clipped-mode sample batching, not for stacking 16 windows
     # simultaneously through a second-order GradCAM backward — that fills 39 GiB.
-    sw_micro_bs = 1
+    sw_micro_bs = args.attack_micro_batch or 1
 
     if args.full_audio:
         overlap_pct = (1.0 - hop_len / clip_len) * 100.0
@@ -914,238 +1285,67 @@ def main() -> None:
               f"hop={hop_len/sample_rate:.2f}s  overlap={overlap_pct:.0f}%  "
               f"micro_bs={sw_micro_bs}")
 
-    # ── Per-sample accumulators (scalars only — no tensors kept across samples) ──
-    all_labels:        list[int]        = []
-    all_preds_orig:    list[int]        = []
-    all_probs_orig:    list[float]      = []
-    all_preds_adv:     list[int]        = []
-    all_probs_adv:     list[float]      = []
-    all_cos_sims:      list[float]      = []
-    all_top10_overlap: list[float]      = []
-    all_pred_pres:     list[int]        = []
-    all_delta_linf:    list[float]      = []
-    all_audio_quality: list[dict]       = []
-    all_histories:     list[list[dict]] = []
+    # ── 6. Dataset + DataLoader ────────────────────────────────────────────────
+    dataset    = AudioPathDataset(atk_paths, gt_labels_list)
+    dataloader = DataLoader(dataset, batch_size=1, num_workers=0, shuffle=False)
 
-    t_total = time.time()
+    # ── 7. Attack module ───────────────────────────────────────────────────────
+    module = AttackModule(
+        args         = args,
+        infer_model  = infer_model,
+        attack_model = attack_model,
+        sample_rate  = sample_rate,
+        cfg          = cfg,
+        clip_len     = clip_len,
+        hop_len      = hop_len,
+        sw_micro_bs  = sw_micro_bs,
+        log_path     = log_path,
+    )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Main per-sample loop: load → attack → metrics → save → free
-    # ──────────────────────────────────────────────────────────────────────────
-    for i, (path, label) in enumerate(zip(atk_paths, gt_labels_list)):
-        _gpu_used = torch.cuda.memory_allocated() / 1e9
-        print(f"\n{'='*60}")
-        print(f"  [{i+1}/{len(atk_paths)}] {path.name}  "
-              f"(label={'real' if label==0 else 'fake'})  "
-              f"GPU: {_gpu_used:.2f} GiB")
-        print(f"{'='*60}")
+    # ── 8. Trainer ─────────────────────────────────────────────────────────────
+    plugins = []
+    if os.environ.get("SLURM_JOB_ID"):
+        plugins.append(SLURMEnvironment(auto_requeue=True))
 
-        # variables declared here so finally block can reference them safely
-        x_single = x_clip = x_adv_clip = None
-        x_adv_full = delta_full = delta_clip = None
-        orig_cpu = adv_cpu = orig_save = adv_save = dlt_save = None
-        pred_orig = prob_orig = pred_adv = prob_adv = None
-        cos_sim_t = pred_pres_t = None
-        cam_orig_np: np.ndarray | None = None
-        cam_adv_np:  np.ndarray | None = None
-        history: list[dict] = []
+    trainer = Trainer(
+        accelerator          = "gpu" if "cuda" in args.device else "cpu",
+        devices              = 1,
+        logger               = tb_logger,
+        callbacks            = [DeviceStatsMonitor()],
+        enable_checkpointing = False,
+        inference_mode       = False,   # GradCAM needs gradients during predict
+        plugins              = plugins or None,
+    )
 
-        try:
-            # ── Load single audio ──────────────────────────────────────────────
-            if args.full_audio:
-                x_single = load_full_waveform(path, sample_rate)   # [T]
-            else:
-                x_single = load_waveform(path, sample_rate, clip_len)  # [clip_len]
+    # ── 9. Run predict (one sample at a time via DataLoader batch_size=1) ──────
+    t_total     = time.time()
+    raw_results = trainer.predict(module, dataloaders=dataloader)
+    elapsed     = time.time() - t_total
 
-            x_clip = x_single[:clip_len].unsqueeze(0).to(args.device)  # [1, clip_len]
-
-            # ── Baseline prediction ────────────────────────────────────────────
-            pred_orig, prob_orig = predict_batch(infer_model, x_clip)
-
-            # ── Attack ────────────────────────────────────────────────────────
-            if args.full_audio:
-                x_adv_full, delta_full, win_result = _attack_full_audio_sample(
-                    args.model_type, attack_model, x_single, cfg,
-                    clip_len, hop_len, sw_micro_bs, args.device,
-                )
-                x_adv_clip  = x_adv_full[:clip_len].unsqueeze(0).to(args.device)
-                cos_sim_t   = win_result.cosine_similarity
-                pred_pres_t = win_result.prediction_preserved
-                history     = win_result.history
-                # First window's CAMs for visualization (representative clip)
-                cam_orig_np = win_result.cam_original[0].cpu().numpy()
-                cam_adv_np  = win_result.cam_adv[0].cpu().numpy()
-                del win_result
-            else:
-                gradcam = _make_gradcam(args.model_type, attack_model)
-                result  = perceptual_xai_attack(attack_model, x_clip, cfg, gradcam=gradcam)
-                x_adv_clip  = result.x_adv
-                delta_clip  = result.delta.squeeze(0).cpu()
-                cos_sim_t   = result.cosine_similarity
-                pred_pres_t = result.prediction_preserved
-                history     = result.history
-                cam_orig_np = result.cam_original[0].cpu().numpy()
-                cam_adv_np  = result.cam_adv[0].cpu().numpy()
-                del result, gradcam
-
-            # ── Post-attack prediction ─────────────────────────────────────────
-            pred_adv, prob_adv = predict_batch(infer_model, x_adv_clip)
-
-            # ── Derived scalars ────────────────────────────────────────────────
-            orig_cpu  = x_clip.squeeze(0).cpu()      # [clip_len]
-            adv_cpu   = x_adv_clip.squeeze(0).cpu()  # [clip_len]
-            cos_mean  = float(cos_sim_t.mean().item())
-            pred_pres = int(pred_pres_t.all().item())
-
-            if args.full_audio:
-                delta_linf = float(delta_full.abs().max().item())
-                orig_save  = x_single.cpu()
-                adv_save   = x_adv_full.cpu()
-                dlt_save   = delta_full.cpu()
-            else:
-                delta_linf = float(delta_clip.abs().max().item())
-                orig_save  = orig_cpu
-                adv_save   = adv_cpu
-                dlt_save   = delta_clip
-
-            # top-10% CAM overlap (clipped mode only — full-audio has no CAMs)
-            if cam_orig_np is not None:
-                cam_o_t  = torch.from_numpy(cam_orig_np).unsqueeze(0)
-                cam_a_t  = torch.from_numpy(cam_adv_np).unsqueeze(0)
-                over_val = float(topk_overlap(cam_o_t, cam_a_t, k_frac=0.1).item())
-            else:
-                over_val = 0.0
-
-            # ── Psychoacoustic metrics ─────────────────────────────────────────
-            print("  Computing perceptual metrics...")
-            psy = _psychoacoustic_one(i, orig_cpu, adv_cpu, sample_rate)
-            psy_str = "  ".join(
-                f"{k.upper()}={v:.3f}" for k, v in psy.items() if v is not None
-            )
-            print(f"  {psy_str}")
-
-            # ── Per-sample JSON ────────────────────────────────────────────────
-            sample_metrics = {
-                "index":          i,
-                "stem":           path.stem,
-                "label":          label,
-                "label_str":      "real" if label == 0 else "fake",
-                "pred_orig":      int(pred_orig.item()),
-                "prob_orig":      round(float(prob_orig.item()), 6),
-                "pred_adv":       int(pred_adv.item()),
-                "prob_adv":       round(float(prob_adv.item()), 6),
-                "correct_orig":   int(pred_orig.item() == label),
-                "correct_adv":    int(pred_adv.item() == label),
-                "pred_preserved": pred_pres,
-                "cos_sim":        round(cos_mean, 6),
-                "top10_overlap":  round(over_val, 6),
-                "delta_linf":     round(delta_linf, 6),
-                **{k: (round(v, 6) if isinstance(v, float) else v)
-                   for k, v in psy.items()},
-            }
-            sample_json = log_path / f"sample_{i:04d}_{path.stem}.json"
-            sample_json.write_text(json.dumps(sample_metrics, indent=2))
-            print(f"  Saved metrics → {sample_json.name}")
-
-            # ── Save audio: full-length original / adversarial / delta ─────────
-            sample_audio_dir = audio_dir / path.stem
-            sample_audio_dir.mkdir(parents=True, exist_ok=True)
-            torchaudio.save(str(sample_audio_dir / "original.wav"),
-                            orig_save.unsqueeze(0), sample_rate)
-            torchaudio.save(str(sample_audio_dir / "adversarial.wav"),
-                            adv_save.unsqueeze(0), sample_rate)
-            torchaudio.save(str(sample_audio_dir / "delta.wav"),
-                            dlt_save.unsqueeze(0), sample_rate)
-            print(f"  Saved audio   → {sample_audio_dir}")
-
-            # ── TensorBoard (per-sample) ───────────────────────────────────────
-            writer.add_image(f"spectrogram/{path.stem}/original",
-                             _make_spectrogram_image(orig_cpu, sample_rate), 0)
-            writer.add_image(f"spectrogram/{path.stem}/adversarial",
-                             _make_spectrogram_image(adv_cpu, sample_rate), 0)
-            writer.add_image(f"spectrogram/{path.stem}/delta",
-                             _make_spectrogram_image(dlt_save[:clip_len], sample_rate), 0)
-            if i < 10:  # audio in TB only for first 10 (large blobs)
-                writer.add_audio(f"audio/{path.stem}/original",
-                                 orig_cpu.unsqueeze(0), sample_rate=sample_rate)
-                writer.add_audio(f"audio/{path.stem}/adversarial",
-                                 adv_cpu.unsqueeze(0), sample_rate=sample_rate)
-
-            # ── Heatmaps + panel images (clipped mode only) ────────────────────
-            if cam_orig_np is not None:
-                hmap_dir = log_path / "heatmaps" / path.stem
-                hmap_dir.mkdir(parents=True, exist_ok=True)
-                np.save(str(hmap_dir / "original.npy"),    cam_orig_np)
-                np.save(str(hmap_dir / "adversarial.npy"), cam_adv_np)
-                _save_sample_images(
-                    sample_dir  = log_path / "images" / path.stem,
-                    orig_wav    = orig_cpu,
-                    adv_wav     = adv_cpu,
-                    delta_wav   = dlt_save,
-                    cam_orig    = cam_orig_np,
-                    cam_adv     = cam_adv_np,
-                    sample_rate = sample_rate,
-                    stem        = path.stem,
-                    label       = label,
-                    pred_orig   = int(pred_orig.item()),
-                    pred_adv    = int(pred_adv.item()),
-                )
-
-            # ── Accumulate scalars for summary ─────────────────────────────────
-            all_labels.append(label)
-            all_preds_orig.append(int(pred_orig.item()))
-            all_probs_orig.append(float(prob_orig.item()))
-            all_preds_adv.append(int(pred_adv.item()))
-            all_probs_adv.append(float(prob_adv.item()))
-            all_cos_sims.append(cos_mean)
-            all_top10_overlap.append(over_val)
-            all_pred_pres.append(pred_pres)
-            all_delta_linf.append(delta_linf)
-            all_audio_quality.append(psy)
-            all_histories.append(history)
-
-        except Exception as exc:
-            import traceback
-            print(f"  [ERROR] sample {i} ({path.name}): {exc}")
-            traceback.print_exc()
-
-        finally:
-            # ── Set every tensor to None so ref-counts drop to zero NOW ────────
-            # (for obj in ...: del obj  only removes the loop var — the originals
-            #  stay alive until the next iteration overwrites them, defeating
-            #  empty_cache() which can only free tensors with no live references.)
-            x_single    = None
-            x_clip      = None
-            x_adv_clip  = None   # GPU tensor — must be freed before empty_cache
-            x_adv_full  = None
-            delta_full  = None
-            delta_clip  = None
-            orig_cpu    = None
-            adv_cpu     = None
-            orig_save   = None
-            adv_save    = None
-            dlt_save    = None
-            pred_orig   = None
-            prob_orig   = None
-            pred_adv    = None
-            prob_adv    = None
-            cos_sim_t   = None
-            pred_pres_t = None
-            cam_orig_np = None
-            cam_adv_np  = None
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    # ── End of per-sample loop ─────────────────────────────────────────────────
-    elapsed = time.time() - t_total
-    n_done  = len(all_labels)
+    # ── 10. Aggregate results ──────────────────────────────────────────────────
+    results = [r for r in (raw_results or []) if r.get("ok")]
+    n_done  = len(results)
     print(f"\nAll {n_done}/{len(atk_paths)} samples done in {elapsed:.1f}s  "
           f"({elapsed / max(n_done, 1):.1f}s / sample)")
 
-    if not all_labels:
+    if not results:
         print("No samples processed successfully.")
-        writer.close()
         return
+
+    all_labels        = [r["label"]         for r in results]
+    all_preds_orig    = [r["pred_orig"]      for r in results]
+    all_probs_orig    = [r["prob_orig"]      for r in results]
+    all_preds_adv     = [r["pred_adv"]       for r in results]
+    all_probs_adv     = [r["prob_adv"]       for r in results]
+    all_cos_sims      = [r["cos_sim"]        for r in results]
+    all_top10_overlap = [r["top10_overlap"]  for r in results]
+    all_pred_pres     = [r["pred_preserved"] for r in results]
+    all_delta_linf    = [r["delta_linf"]     for r in results]
+    all_audio_quality = [
+        {k: r.get(k) for k in ("pesq", "stoi", "visqol", "peaq", "zimtohrli")}
+        for r in results
+    ]
+    all_histories = [r.get("history", []) for r in results]
 
     # ── Aggregate classification metrics ───────────────────────────────────────
     labels_np     = np.array(all_labels)
@@ -1159,10 +1359,10 @@ def main() -> None:
     _print_metrics("Original (attack batch)", orig_atk_metrics)
     _print_metrics("Adversarial predictions", adv_metrics)
 
-    mean_cos   = float(np.mean(all_cos_sims))      if all_cos_sims      else 0.0
-    mean_over  = float(np.mean(all_top10_overlap)) if all_top10_overlap else 0.0
-    mean_linf  = float(np.mean(all_delta_linf))    if all_delta_linf    else 0.0
-    pred_pres_frac = float(np.mean(all_pred_pres)) if all_pred_pres     else 0.0
+    mean_cos       = float(np.mean(all_cos_sims))      if all_cos_sims      else 0.0
+    mean_over      = float(np.mean(all_top10_overlap)) if all_top10_overlap else 0.0
+    mean_linf      = float(np.mean(all_delta_linf))    if all_delta_linf    else 0.0
+    pred_pres_frac = float(np.mean(all_pred_pres))     if all_pred_pres     else 0.0
 
     print(f"\n  CAM cosine sim  : mean={mean_cos:.4f}  (lower = more explanation change)")
     print(f"  Top-10% overlap : mean={mean_over:.4f}  (lower = more disagreement)")
@@ -1219,7 +1419,11 @@ def main() -> None:
     out_json.write_text(json.dumps(summary, indent=2))
     print(f"\nResults → {out_json}")
 
-    # ── TensorBoard (aggregate) ────────────────────────────────────────────────
+    # ── TensorBoard aggregate writes ───────────────────────────────────────────
+    # trainer.predict() closes tb_logger internally, so open a fresh writer that
+    # appends events to the same log directory.
+    writer = SummaryWriter(log_dir=str(log_path))
+
     def _metrics_md_table(metrics: dict, title: str) -> str:
         rows = "\n".join(f"| {k} | {v:.4f} |" for k, v in metrics.items()
                          if isinstance(v, float))
@@ -1248,7 +1452,6 @@ def main() -> None:
         writer.add_text("metrics/perceptual",
                         _metrics_md_table(perceptual_means, "Perceptual quality (orig → adv)"), 0)
 
-    # Loss history — merge average across all samples, then log per step
     if all_histories:
         n_steps_hist = max(len(h) for h in all_histories)
         merged_history: list[dict] = []
