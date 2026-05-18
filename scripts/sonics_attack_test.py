@@ -26,24 +26,26 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
+if not hasattr(np, "float"):
+    np.float = float  # cdpam uses the removed np.float alias
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
+import cdpam
+import torchaudio
+
 from audio_xai.fetching_and_metrics.peaq_implementation import peaq_like
 from audio_xai.fetching_and_metrics.preprocessing_metrics import (
-    CDPAM_SR,
     PESQ_SR,
-    _init_cdpam,
-    compute_cdpam,
     compute_pesq,
     compute_stoi,
 )
-from audio_xai.metrics.visqol import ViSQOL
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sonics import HFAudioClassifier
 
@@ -109,7 +111,84 @@ class SpecTTTraGradCAM(GradCAMBase):
         return F.relu(cam)                                # [B, N_tokens]
 
 
+# ── Classification metrics ────────────────────────────────────────────────────
+
+def compute_clf_metrics(
+    gt: torch.Tensor,
+    preds: torch.Tensor,
+    probs: torch.Tensor,
+) -> dict[str, float]:
+    """Compute accuracy, macro-F1, and AUROC given ground-truth labels.
+
+    gt: int64 [B], values 0/1 (-1 = unknown, excluded).
+    preds: int64 [B], predicted class.
+    probs: float [B], probability of class 1 (fake).
+    Returns {} when sklearn is unavailable or no labelled samples exist.
+    """
+    mask = gt >= 0
+    if mask.sum() == 0:
+        return {}
+
+    gt_np    = gt[mask].cpu().numpy()
+    preds_np = preds[mask].cpu().numpy()
+    probs_np = probs[mask].cpu().numpy()
+
+    try:
+        from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+        acc  = float(accuracy_score(gt_np, preds_np))
+        f1   = float(f1_score(gt_np, preds_np, average="macro", zero_division=0))
+        try:
+            auroc = float(roc_auc_score(gt_np, probs_np))
+        except ValueError:
+            auroc = float("nan")
+        return {"accuracy": acc, "f1_macro": f1, "auroc": auroc}
+    except ImportError:
+        # Manual fallback without sklearn
+        tp = int(((preds_np == 1) & (gt_np == 1)).sum())
+        tn = int(((preds_np == 0) & (gt_np == 0)).sum())
+        fp = int(((preds_np == 1) & (gt_np == 0)).sum())
+        fn = int(((preds_np == 0) & (gt_np == 1)).sum())
+        n  = len(gt_np)
+        acc  = (tp + tn) / n
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        return {"accuracy": acc, "f1_macro": f1, "auroc": float("nan")}
+
+
 # ── Audio loading ─────────────────────────────────────────────────────────────
+
+def _load_csv_labels(audio_dir: Path) -> dict[str, int]:
+    """Return {relative_filepath: int_target} from the first CSV found in audio_dir."""
+    import csv as _csv
+
+    for name in ("test.csv", "valid.csv", "train.csv"):
+        csv_path = audio_dir / name
+        if not csv_path.exists():
+            continue
+        label_map: dict[str, int] = {}
+        with open(csv_path, newline="") as f:
+            for row in _csv.DictReader(f):
+                fp = row.get("filepath", "").strip()
+                tgt = row.get("target", "").strip()
+                if fp and tgt.lstrip("-").isdigit():
+                    label_map[fp] = int(tgt)
+        print(f"Loaded {len(label_map)} labels from {csv_path.name}")
+        return label_map
+    return {}
+
+
+def _load_one_clip(path: Path, sample_rate: int, clip_len: int, rng) -> torch.Tensor | None:
+    """Load a single random-offset clip from path. Returns None if the file is too short."""
+    wav, sr = torchaudio.load(str(path))
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    wav = wav.mean(0)
+    if wav.shape[0] < clip_len:
+        return None
+    start = rng.randint(0, wav.shape[0] - clip_len)
+    return wav[start : start + clip_len]
+
 
 def load_waveforms(
     audio_dir: Path | None,
@@ -117,54 +196,171 @@ def load_waveforms(
     sample_rate: int,
     clip_seconds: float,
     device: str,
-) -> torch.Tensor:
-    """Return [n_samples, T] float32 waveforms on device.
+    seed: int = 42,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Return (waveforms [B,T], labels [B] or None) balanced across real/fake.
 
-    Slices non-overlapping clips from wav/flac files under audio_dir.
+    Stratifies by class so both labels are always present (required for AUROC).
     Falls back to Gaussian noise when audio_dir is None or yields too few clips.
+    Labels are int64 tensors (0=real, 1=fake); None when no CSV is available.
     """
+    import random
+
+    rng = random.Random(seed)
     clip_len = int(clip_seconds * sample_rate)
 
     if audio_dir is not None:
         try:
-            import torchaudio
+            label_map = _load_csv_labels(audio_dir)
 
             audio_files = (
-                sorted(audio_dir.glob("**/*.wav"))
-                + sorted(audio_dir.glob("**/*.mp3"))
-                + sorted(audio_dir.glob("**/*.flac"))
+                list(audio_dir.glob("**/*.wav"))
+                + list(audio_dir.glob("**/*.mp3"))
+                + list(audio_dir.glob("**/*.flac"))
             )
-            clips: list[torch.Tensor] = []
-            for path in audio_files:
-                wav, sr = torchaudio.load(str(path))
-                if sr != sample_rate:
-                    wav = torchaudio.functional.resample(wav, sr, sample_rate)
-                wav = wav.mean(0)  # to mono
-                for start in range(0, wav.shape[0] - clip_len + 1, clip_len):
-                    clips.append(wav[start : start + clip_len])
-                    if len(clips) >= n_samples:
-                        break
-                if len(clips) >= n_samples:
-                    break
+            print(f"Found {len(audio_files)} audio files total.")
 
-            if len(clips) >= n_samples:
-                return torch.stack(clips[:n_samples]).to(device)
-            print(f"[warn] Only {len(clips)}/{n_samples} clips from {audio_dir}; padding with noise.")
-            noise = 0.01 * torch.randn(n_samples - len(clips), clip_len)
-            parts = [torch.stack(clips), noise] if clips else [noise]
-            return torch.cat(parts, dim=0).to(device)
+            # Stratify by label so the batch is always balanced real/fake.
+            real_files = [p for p in audio_files
+                          if label_map.get(str(p.relative_to(audio_dir)), -1) == 0]
+            fake_files = [p for p in audio_files
+                          if label_map.get(str(p.relative_to(audio_dir)), -1) == 1]
+            rng.shuffle(real_files)
+            rng.shuffle(fake_files)
+            print(f"  real files: {len(real_files)}  |  fake files: {len(fake_files)}")
+
+            half = n_samples // 2  # target per class
+
+            def _collect(files: list[Path], target: int, need: int) -> tuple[list, list]:
+                clips_, labels_ = [], []
+                for p in files:
+                    if len(clips_) >= need:
+                        break
+                    clip = _load_one_clip(p, sample_rate, clip_len, rng)
+                    if clip is not None:
+                        clips_.append(clip)
+                        labels_.append(target)
+                return clips_, labels_
+
+            real_clips, real_labels = _collect(real_files, 0, half)
+            fake_clips, fake_labels = _collect(fake_files, 1, half)
+
+            # If one class is short, fill remaining quota from the other.
+            shortage = n_samples - len(real_clips) - len(fake_clips)
+            if shortage > 0 and len(real_clips) < half:
+                extra, extra_l = _collect(fake_files[len(fake_clips):], 1, shortage)
+                fake_clips += extra; fake_labels += extra_l
+            elif shortage > 0:
+                extra, extra_l = _collect(real_files[len(real_clips):], 0, shortage)
+                real_clips += extra; real_labels += extra_l
+
+            clips      = real_clips + fake_clips
+            clip_labels = real_labels + fake_labels
+
+            # Final interleaved shuffle so class order is random.
+            combined = list(zip(clips, clip_labels))
+            rng.shuffle(combined)
+            clips, clip_labels = map(list, zip(*combined)) if combined else ([], [])
+
+            n_got = len(clips)
+            n_real_got = clip_labels.count(0)
+            n_fake_got = clip_labels.count(1)
+            print(f"Loaded {n_got} clips  (real={n_real_got}, fake={n_fake_got})")
+
+            if n_got == 0:
+                print("[warn] No clips loaded; falling back to noise.")
+            elif n_got < n_samples:
+                print(f"[warn] Only {n_got}/{n_samples} clips available.")
+
+            if n_got > 0:
+                waveforms = torch.stack(clips[:n_samples]).to(device)
+                labels_t  = torch.tensor(clip_labels[:n_samples], dtype=torch.long)
+                return waveforms, labels_t if (labels_t >= 0).any() else None
 
         except Exception as exc:
-            print(f"[warn] Audio loading failed ({exc}); using noise.")
+            import traceback
+            print(f"[warn] Audio loading failed: {exc}")
+            traceback.print_exc()
 
     print(
         f"Using synthetic Gaussian noise "
         f"({n_samples} clips × {clip_len} samples @ {sample_rate} Hz)"
     )
-    return 0.01 * torch.randn(n_samples, clip_len, device=device)
+    return 0.01 * torch.randn(n_samples, clip_len, device=device), None
 
 
 # ── Audio quality metrics ─────────────────────────────────────────────────────
+
+def _visqol_score(ref_np: np.ndarray, deg_np: np.ndarray, sample_rate: int) -> float:
+    """Compute ViSQOL MOS-LQO using the visqol-python package.
+
+    Uses speech mode (16 kHz). The library resamples internally if needed,
+    so no manual resampling is required.
+    """
+    from visqol import VisqolApi
+
+    api = VisqolApi()
+    api.create(mode="speech")
+    result = api.measure_from_arrays(
+        ref_np.astype(np.float64),
+        deg_np.astype(np.float64),
+        sample_rate=sample_rate,
+    )
+    return float(result.moslqo)
+
+
+def _cpu_metrics_one(i: int, orig: torch.Tensor, adv: torch.Tensor, sample_rate: int) -> dict:
+    """Compute PESQ, STOI, ViSQOL, PEAQ for a single sample. Runs on CPU; thread-safe."""
+    m: dict = {}
+
+    if sample_rate != PESQ_SR:
+        orig_16k = torchaudio.functional.resample(orig, sample_rate, PESQ_SR)
+        adv_16k  = torchaudio.functional.resample(adv,  sample_rate, PESQ_SR)
+    else:
+        orig_16k, adv_16k = orig, adv
+    orig_np = orig_16k.numpy()
+    adv_np  = adv_16k.numpy()
+
+    try:
+        m["pesq"] = round(compute_pesq(orig_16k, adv_16k, sr=PESQ_SR), 6)
+    except Exception as e:
+        m["pesq"] = None
+        print(f"  [warn] PESQ [{i}]: {e}")
+
+    try:
+        m["stoi"] = round(compute_stoi(orig_np, adv_np, sr=PESQ_SR), 6)
+    except Exception as e:
+        m["stoi"] = None
+        print(f"  [warn] STOI [{i}]: {e}")
+
+    try:
+        m["visqol"] = round(_visqol_score(orig_np, adv_np, PESQ_SR), 6)
+    except Exception as e:
+        m["visqol"] = None
+        print(f"  [warn] ViSQOL [{i}]: {e}")
+
+    ref_path = deg_path = None
+    try:
+        fd_r, ref_path = tempfile.mkstemp(suffix=".wav")
+        fd_d, deg_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd_r); os.close(fd_d)
+        orig_48k = torchaudio.functional.resample(orig, sample_rate, 48_000).unsqueeze(0)
+        adv_48k  = torchaudio.functional.resample(adv,  sample_rate, 48_000).unsqueeze(0)
+        torchaudio.save(ref_path, orig_48k, 48_000)
+        torchaudio.save(deg_path, adv_48k,  48_000)
+        m["peaq"] = round(peaq_like(ref_path, deg_path), 6)
+    except Exception as e:
+        m["peaq"] = None
+        print(f"  [warn] PEAQ [{i}]: {e}")
+    finally:
+        for p in filter(None, [ref_path, deg_path]):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    return m
+
 
 def compute_audio_metrics(
     x_orig: torch.Tensor,
@@ -172,83 +368,52 @@ def compute_audio_metrics(
     sample_rate: int,
     cdpam_model=None,
 ) -> list[dict]:
-    """Compute PESQ, STOI, ViSQOL, CDPAM, PEAQ for each original/adversarial pair.
+    """Compute PESQ, STOI, PEAQ, CDPAM, ViSQOL for each original/adversarial pair.
+
+    CPU metrics (PESQ/STOI/ViSQOL/PEAQ) run in parallel across all available
+    cores. CDPAM runs sequentially on GPU afterwards.
 
     x_orig, x_adv: [B, T] float32 at sample_rate Hz.
     Returns a list of per-sample dicts; None values indicate a metric failure.
     """
-    import torchaudio
+    from concurrent.futures import ThreadPoolExecutor
 
-    visqol = ViSQOL(sr=PESQ_SR)
     n = x_orig.shape[0]
-    all_metrics: list[dict] = []
+    origs = [x_orig[i].cpu() for i in range(n)]
+    advs  = [x_adv[i].cpu()  for i in range(n)]
 
+    # ── CPU metrics in parallel (PESQ/STOI/ViSQOL/PEAQ) ──────────────────────
+    n_workers = min(n, os.cpu_count() or 4)
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_cpu_metrics_one, i, origs[i], advs[i], sample_rate)
+                   for i in range(n)]
+        all_metrics = [f.result() for f in futures]
+
+    # ── CDPAM: GPU-bound, must stay sequential ────────────────────────────────
     for i in range(n):
-        orig = x_orig[i].cpu()
-        adv = x_adv[i].cpu()
-        m: dict = {}
-
-        # ── resample to 16 kHz for PESQ / STOI / ViSQOL ─────────────────────
-        if sample_rate != PESQ_SR:
-            orig_16k = torchaudio.functional.resample(orig, sample_rate, PESQ_SR)
-            adv_16k  = torchaudio.functional.resample(adv,  sample_rate, PESQ_SR)
-        else:
-            orig_16k, adv_16k = orig, adv
-        orig_np = orig_16k.numpy()
-        adv_np  = adv_16k.numpy()
-
+        if cdpam_model is None:
+            all_metrics[i]["cdpam"] = None
+            continue
+        ref_cdpam = deg_cdpam = None
         try:
-            m["pesq"] = round(compute_pesq(orig_16k, adv_16k, sr=PESQ_SR), 6)
-        except Exception as e:
-            m["pesq"] = None
-            print(f"  [warn] PESQ [{i}]: {e}")
-
-        try:
-            m["stoi"] = round(compute_stoi(orig_np, adv_np, sr=PESQ_SR), 6)
-        except Exception as e:
-            m["stoi"] = None
-            print(f"  [warn] STOI [{i}]: {e}")
-
-        try:
-            m["visqol"] = round(float(visqol.evaluate(orig_np, adv_np)), 6)
-        except Exception as e:
-            m["visqol"] = None
-            print(f"  [warn] ViSQOL [{i}]: {e}")
-
-        # ── CDPAM: needs [1,1,T] at 22050 Hz ─────────────────────────────────
-        if cdpam_model is not None:
-            try:
-                orig_22k = torchaudio.functional.resample(orig, sample_rate, CDPAM_SR).unsqueeze(0).unsqueeze(0)
-                adv_22k  = torchaudio.functional.resample(adv,  sample_rate, CDPAM_SR).unsqueeze(0).unsqueeze(0)
-                m["cdpam"] = round(compute_cdpam(cdpam_model, orig_22k, adv_22k), 6)
-            except Exception as e:
-                m["cdpam"] = None
-                print(f"  [warn] CDPAM [{i}]: {e}")
-        else:
-            m["cdpam"] = None
-
-        # ── PEAQ: needs WAV files at 48 kHz ───────────────────────────────────
-        ref_path = deg_path = None
-        try:
-            fd_r, ref_path = tempfile.mkstemp(suffix=".wav")
-            fd_d, deg_path = tempfile.mkstemp(suffix=".wav")
+            fd_r, ref_cdpam = tempfile.mkstemp(suffix=".wav")
+            fd_d, deg_cdpam = tempfile.mkstemp(suffix=".wav")
             os.close(fd_r); os.close(fd_d)
-            orig_48k = torchaudio.functional.resample(orig, sample_rate, 48_000).unsqueeze(0)
-            adv_48k  = torchaudio.functional.resample(adv,  sample_rate, 48_000).unsqueeze(0)
-            torchaudio.save(ref_path, orig_48k, 48_000)
-            torchaudio.save(deg_path, adv_48k,  48_000)
-            m["peaq"] = round(peaq_like(ref_path, deg_path), 6)
+            torchaudio.save(ref_cdpam, origs[i].unsqueeze(0), sample_rate)
+            torchaudio.save(deg_cdpam, advs[i].unsqueeze(0),  sample_rate)
+            wav_ref = cdpam.load_audio(ref_cdpam)
+            wav_out = cdpam.load_audio(deg_cdpam)
+            dist = cdpam_model.forward(wav_ref, wav_out)
+            all_metrics[i]["cdpam"] = round(float(dist.item()), 6)
         except Exception as e:
-            m["peaq"] = None
-            print(f"  [warn] PEAQ [{i}]: {e}")
+            all_metrics[i]["cdpam"] = None
+            print(f"  [warn] CDPAM [{i}]: {e}")
         finally:
-            for p in filter(None, [ref_path, deg_path]):
+            for p in filter(None, [ref_cdpam, deg_cdpam]):
                 try:
                     os.unlink(p)
                 except OSError:
                     pass
-
-        all_metrics.append(m)
 
     return all_metrics
 
@@ -269,8 +434,6 @@ def save_results(log_path: Path, result, overlap: torch.Tensor, args, audio_metr
             sample_XX_original.npy
             sample_XX_adversarial.npy
     """
-    import torchaudio
-
     audio_dir = log_path / "audio"
     heatmap_dir = log_path / "heatmaps"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -350,12 +513,32 @@ def save_results(log_path: Path, result, overlap: torch.Tensor, args, audio_metr
     print(f"  heatmaps/          → {heatmap_dir}  ({n * 2} files)")
 
 
-def _heatmap_to_image(cam: torch.Tensor) -> torch.Tensor:
-    """Normalise a [N_tokens] heatmap to a [1, 1, N_tokens] uint8 image for TensorBoard."""
+def _heatmap_to_image(cam: torch.Tensor, height: int = 64, width: int = 512) -> torch.Tensor:
+    """Normalise a [N_tokens] CAM to a [1, H, W] image for TensorBoard.
+
+    Upscales from the raw token count to a readable strip so that the
+    per-token importance is visible rather than a few-pixel sliver.
+    """
     cam = cam.float().cpu()
     lo, hi = cam.min(), cam.max()
-    cam = (cam - lo) / (hi - lo + 1e-8)          # [0, 1]
-    return cam.unsqueeze(0).unsqueeze(0)           # [1, 1, N_tokens]
+    cam = (cam - lo) / (hi - lo + 1e-8)                          # [N_tokens]
+    cam_4d = cam.view(1, 1, 1, -1)                               # [1, 1, 1, N_tokens] — 4D for 2D interp
+    return F.interpolate(cam_4d, size=(height, width), mode="nearest").squeeze(0)  # [1, H, W]
+
+
+def _waveform_to_spectrogram_image(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    """Convert a [T] waveform to a [3, n_mels, n_frames] colored mel-spectrogram for TensorBoard."""
+    import matplotlib.cm as cm
+
+    mel_transform = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate, n_fft=1024, hop_length=256, n_mels=128
+    )
+    db_transform = torchaudio.transforms.AmplitudeToDB()
+    spec = db_transform(mel_transform(waveform.cpu().unsqueeze(0))).squeeze(0)  # [128, n_frames]
+    lo, hi = spec.min(), spec.max()
+    spec_norm = ((spec - lo) / (hi - lo + 1e-8)).flip(0).numpy()  # low freq at bottom
+    colored = cm.magma(spec_norm)[:, :, :3]  # [128, n_frames, 3] — drop alpha
+    return torch.from_numpy(colored).permute(2, 0, 1).float()  # [3, 128, n_frames]
 
 
 def main() -> None:
@@ -379,6 +562,8 @@ def main() -> None:
                    help="Number of waveforms to attack")
     p.add_argument("--n-steps", type=int, default=50,
                    help="Attack optimisation steps")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed for dataset shuffling")
     p.add_argument("--log-dir", type=Path, default=Path("runs/sonics_attack"),
                    help="TensorBoard log directory")
     p.add_argument(
@@ -392,7 +577,10 @@ def main() -> None:
     # 0 ── Initialise CDPAM (expensive; done once)
     print("\nInitialising CDPAM model…")
     try:
-        cdpam_model = _init_cdpam()
+        _orig_load = torch.load
+        torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+        cdpam_model = cdpam.CDPAM()
+        torch.load = _orig_load
         print("  CDPAM ready.")
     except Exception as e:
         cdpam_model = None
@@ -412,22 +600,38 @@ def main() -> None:
     print(f"  N_tokens    = {n_tokens} ({n_temporal} temporal + {n_spectral} spectral)")
 
     # 2 ── Load audio (or synthetic noise)
-    x = load_waveforms(
+    x, gt_labels = load_waveforms(
         args.audio_dir,
         args.n_samples,
         args.sample_rate,
         args.clip_seconds,
         args.device,
+        seed=args.seed,
     )
     print(f"\nInput batch: {list(x.shape)}  mean|x| = {x.abs().mean():.4f}")
 
     # 3 ── Baseline forward pass
     with torch.no_grad():
         logits = model(x)
-    preds = logits.argmax(dim=-1)
-    probs = logits.softmax(dim=-1)
-    print(f"\nBaseline predictions : {preds.tolist()}")
-    print(f"Baseline confidence  : {[f'{v:.3f}' for v in probs.max(dim=-1).values.tolist()]}")
+    if logits.shape[1] == 1:
+        probs_orig = logits.sigmoid().squeeze(1)
+        preds_orig = (probs_orig >= 0.5).long()
+    else:
+        probs_orig = logits.softmax(dim=-1)[:, 1]
+        preds_orig = logits.argmax(dim=-1)
+    print(f"\nBaseline predictions : {preds_orig.tolist()}  (0=real, 1=fake)")
+    print(f"Baseline confidence  : {[f'{v:.3f}' for v in probs_orig.tolist()]}")
+
+    if gt_labels is not None:
+        print(f"Ground-truth labels  : {gt_labels.tolist()}")
+        orig_clf = compute_clf_metrics(gt_labels, preds_orig, probs_orig)
+        if orig_clf:
+            print(f"\n── Classification metrics (original) ───────────────────────────────")
+            print(f"  Accuracy : {orig_clf['accuracy']:.4f}")
+            print(f"  F1 macro : {orig_clf['f1_macro']:.4f}")
+            print(f"  AUROC    : {orig_clf['auroc']:.4f}")
+    else:
+        orig_clf = {}
 
     # 4 ── Run perceptual XAI attack
     gradcam = SpecTTTraGradCAM(model)
@@ -448,7 +652,35 @@ def main() -> None:
     print(f"Top-10% token overlap: {[f'{v:.3f}' for v in overlap.tolist()]}")
     print(f"  mean = {overlap.mean():.4f}  (lower = more explanation disagreement)")
 
-    # 5b ── Perceptual audio quality metrics
+    # 5b ── Adversarial forward pass + classification metrics
+    with torch.no_grad():
+        logits_adv = model(result.x_adv)
+    if logits_adv.shape[1] == 1:
+        probs_adv = logits_adv.sigmoid().squeeze(1)
+        preds_adv = (probs_adv >= 0.5).long()
+    else:
+        probs_adv = logits_adv.softmax(dim=-1)[:, 1]
+        preds_adv = logits_adv.argmax(dim=-1)
+
+    print(f"\nAdversarial predictions : {preds_adv.tolist()}  (0=real, 1=fake)")
+    print(f"Adversarial confidence  : {[f'{v:.3f}' for v in probs_adv.tolist()]}")
+
+    if gt_labels is not None:
+        adv_clf = compute_clf_metrics(gt_labels, preds_adv, probs_adv)
+        if adv_clf:
+            print(f"\n── Classification metrics (adversarial) ────────────────────────────")
+            print(f"  Accuracy : {adv_clf['accuracy']:.4f}")
+            print(f"  F1 macro : {adv_clf['f1_macro']:.4f}")
+            print(f"  AUROC    : {adv_clf['auroc']:.4f}")
+            if orig_clf:
+                print(f"\n── Δ (adversarial − original) ──────────────────────────────────────")
+                print(f"  ΔAccuracy : {adv_clf['accuracy'] - orig_clf['accuracy']:+.4f}")
+                print(f"  ΔF1 macro : {adv_clf['f1_macro'] - orig_clf['f1_macro']:+.4f}")
+                print(f"  ΔAUROC    : {adv_clf['auroc'] - orig_clf['auroc']:+.4f}")
+    else:
+        adv_clf = {}
+
+    # 5c ── Perceptual audio quality metrics
     x_orig = result.x_adv - result.delta
     print("\n── Perceptual metrics (orig vs adversarial) ────────────────────────")
     audio_metrics = compute_audio_metrics(x_orig, result.x_adv, args.sample_rate, cdpam_model)
@@ -493,11 +725,24 @@ def main() -> None:
         if vals:
             writer.add_scalar(f"final/mean_{key}", float(np.mean(vals)), 0)
 
-    # 6c  Audio: original and adversarial waveforms
+    # 6c  Classification metrics — original and adversarial on the same chart
+    for metric_key in ("accuracy", "f1_macro", "auroc"):
+        values: dict[str, float] = {}
+        if metric_key in orig_clf:
+            values["original"] = orig_clf[metric_key]
+        if metric_key in adv_clf:
+            values["adversarial"] = adv_clf[metric_key]
+        if values:
+            writer.add_scalars(f"clf/{metric_key}", values, 0)
+        if metric_key in orig_clf and metric_key in adv_clf:
+            writer.add_scalar(f"clf/delta_{metric_key}",
+                              adv_clf[metric_key] - orig_clf[metric_key], 0)
+
+    # 6d  Audio: original and adversarial waveforms
     for i in range(args.n_samples):
         writer.add_audio(
             f"audio/sample_{i:02d}_original",
-            result.x_adv[i].cpu() - result.delta[i].cpu(),  # reconstruct original
+            result.x_adv[i].cpu() - result.delta[i].cpu(),
             sample_rate=args.sample_rate,
         )
         writer.add_audio(
@@ -506,7 +751,25 @@ def main() -> None:
             sample_rate=args.sample_rate,
         )
 
-    # 6d  Heatmaps: Grad-CAM token importance strips [1, 1, N_tokens]
+    # 6d  Mel spectrograms: original, adversarial, delta
+    for i in range(args.n_samples):
+        orig_wav = result.x_adv[i].cpu() - result.delta[i].cpu()
+        adv_wav  = result.x_adv[i].cpu()
+        delta_wav = result.delta[i].cpu()
+        writer.add_image(
+            f"spectrogram/sample_{i:02d}_original",
+            _waveform_to_spectrogram_image(orig_wav, args.sample_rate),
+        )
+        writer.add_image(
+            f"spectrogram/sample_{i:02d}_adversarial",
+            _waveform_to_spectrogram_image(adv_wav, args.sample_rate),
+        )
+        writer.add_image(
+            f"spectrogram/sample_{i:02d}_delta",
+            _waveform_to_spectrogram_image(delta_wav, args.sample_rate),
+        )
+
+    # 6e  Grad-CAM token importance (upscaled to readable strip)
     for i in range(args.n_samples):
         writer.add_image(
             f"gradcam/sample_{i:02d}_original",
@@ -517,7 +780,7 @@ def main() -> None:
             _heatmap_to_image(result.cam_adv[i]),
         )
 
-    # 6e  Delta distribution histogram
+    # 6f  Delta distribution histogram
     writer.add_histogram("delta/values", result.delta.cpu().flatten())
 
     writer.close()
