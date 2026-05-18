@@ -20,32 +20,48 @@ AST_SAMPLE_RATE = 16_000
 AST_N_MELS = 128
 AST_N_FFT = 400
 AST_HOP = 160
-AST_TARGET_FRAMES = 1024  # AST expects ~10.24s at 16kHz / hop 160
 AST_MEAN = -4.2677393
 AST_STD = 4.5689974
 
 
 class ASTBinary(AudioClassifier):
-    def __init__(self, pretrained: bool = True):
+    def __init__(self, pretrained: bool = True, clip_seconds: float = 10.0):
         """Constructs ASTBinary with AST backbone and differentiable audio preprocessing.
 
-        Loads HF AST checkpoint (pretrained=True) or initializes fresh config for 2 labels. Sets up MelSpectrogram and AmplitudeToDB transforms.
+        Loads HF AST checkpoint (pretrained=True) or initializes fresh config for 2 labels.
+        ``clip_seconds`` controls the mel frame count fed to the backbone: the config's
+        ``max_length`` is set to match so that position embeddings are the right size.
+        For 2-second clips this drops the token count from 1214 → 230, making the
+        second-order GradCAM attack feasible on a 40 GiB A100.
 
         Parameters:
             pretrained (bool): If true, load pretrained AST weights; otherwise initialize a new AST model.
+            clip_seconds (float): Audio clip duration in seconds; determines the mel frame target and backbone max_length.
         """
         super().__init__()
 
+        # mel frames for this clip length; must match backbone max_length exactly
+        self.target_frames = int(clip_seconds * AST_SAMPLE_RATE / AST_HOP)
+
         if pretrained:
+            # Load the pretrained config then override max_length so position
+            # embeddings are sized for our clip length, not AudioSet's 10s default.
+            cfg = ASTConfig.from_pretrained(AST_CHECKPOINT)
+            cfg.max_length = self.target_frames
+            cfg.num_labels = 2
             self.backbone = ASTForAudioClassification.from_pretrained(
                 AST_CHECKPOINT,
-                num_labels=2,
+                config=cfg,
                 ignore_mismatched_sizes=True,
+                attn_implementation="eager",  # SDPA breaks create_graph=True (second-order GradCAM) in transformers ≥5.x
             )
         else:
-            cfg = ASTConfig()  # type: ignore[call-arg, unknown-argument]
-            cfg.num_labels = 2
-            self.backbone = ASTForAudioClassification(cfg)
+            cfg = ASTConfig(max_length=self.target_frames, num_labels=2)
+            try:
+                self.backbone = ASTForAudioClassification(cfg, attn_implementation="eager")
+            except TypeError:
+                # older transformers versions don't accept attn_implementation in __init__
+                self.backbone = ASTForAudioClassification(cfg)
 
         # Differentiable mel spectrogram. kept on the same device as the model.
         self.mel = T.MelSpectrogram(
@@ -67,18 +83,17 @@ class ASTBinary(AudioClassifier):
             waveform (torch.Tensor): Audio batch [B, T]; samples in [-1, 1].
 
         Returns:
-            torch.Tensor: Log-mel features [B, AST_TARGET_FRAMES, AST_N_MELS], normalized; time axis padded/trimmed.
+            torch.Tensor: Log-mel features [B, target_frames, AST_N_MELS], normalized; time axis padded/trimmed.
         """
         spec = self.mel(waveform)  # [B, n_mels, frames]
         spec = self.amp_to_db(spec)  # log-mel
         spec = (spec - AST_MEAN) / (AST_STD * 2)
 
-        # Pad/crop time axis to AST_TARGET_FRAMES.
         frames = spec.shape[-1]
-        if frames < AST_TARGET_FRAMES:
-            spec = nn.functional.pad(spec, (0, AST_TARGET_FRAMES - frames))
+        if frames < self.target_frames:
+            spec = nn.functional.pad(spec, (0, self.target_frames - frames))
         else:
-            spec = spec[..., :AST_TARGET_FRAMES]
+            spec = spec[..., :self.target_frames]
 
         # AST wants [B, frames, n_mels].
         return spec.transpose(-1, -2)
