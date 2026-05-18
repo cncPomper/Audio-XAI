@@ -89,16 +89,20 @@ def masking_threshold(
     spread_db = spreading_function(bark_dist)  # [n_freq, n_freq]
 
     # Each masker contributes (its level + spread - constant) at every other
-    # frequency. The total threshold is the dB-domain sum of contributions
-    # (approximated as max for differentiability and standard practice).
-    # contrib[B, masker, maskee, frame] = psd_db[B, masker, frame] + spread[masker, maskee] - 6.025
-    contrib = (
-        psd_db.unsqueeze(2)  # [B, n_freq(masker), 1, n_frames]
-        + spread_db.unsqueeze(0).unsqueeze(-1)  # [1, n_freq(masker), n_freq(maskee), 1]
-        - 6.025  # offset from the standard model
-    )
-    # Combine maskers via softmax-max (smooth max) to keep gradients alive.
-    masker_threshold_db, _ = contrib.max(dim=1)  # [B, n_freq(maskee), n_frames]
+    # frequency. The total threshold is the max over all masker contributions.
+    # Naive approach builds [B, n_freq, n_freq, n_frames] which is ~165 GB at
+    # B=1000; instead we iterate over masker frequencies one at a time so peak
+    # memory is only [B, n_freq, n_frames] per step.
+    masker_threshold_db = torch.full_like(psd_db, float("-inf"))
+    for i in range(n_freq):
+        # psd_db[:, i, :]: level of masker i  [B, n_frames]
+        # spread_db[i, :]: spreading to each maskee  [n_freq]
+        contrib_i = (
+            psd_db[:, i, :].unsqueeze(1)      # [B, 1, n_frames]
+            + spread_db[i].view(1, n_freq, 1)  # [1, n_freq, 1]
+            - 6.025
+        )  # [B, n_freq, n_frames]
+        torch.maximum(masker_threshold_db, contrib_i, out=masker_threshold_db)
 
     # Combine with absolute threshold of hearing (also a floor).
     ath_db = absolute_threshold_of_hearing(freqs).to(device)  # [n_freq]
