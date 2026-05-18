@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "Audio-XAI"
-version = "0.0.2.post2"
+version = "0.0.2.post3"
 description = "Python Boilerplate contains all the boilerplate you need to create a Python package."
 readme = "README.md"
 authors = [
