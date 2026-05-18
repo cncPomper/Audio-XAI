@@ -49,6 +49,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torchaudio
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -275,6 +276,9 @@ def main() -> None:
     )
     print(f"Dataset: {len(dataset)} total files  →  attacking {n} samples (seed={args.seed})")
 
+    audio_dir = args.out_dir / "audio"
+    audio_dir.mkdir(exist_ok=True)
+
     # ── Model ─────────────────────────────────────────────────────────────────
     model, model_metadata = _build_model(args.model, args.checkpoint,
                                           vggish_ckpt=args.vggish_ckpt)
@@ -314,6 +318,10 @@ def main() -> None:
     for i, (wav, label) in enumerate(tqdm(loader, desc=f"Attacking [{args.model}]")):
         wav = wav.to(args.device)
 
+        # Resolve source filename from the original dataset index.
+        src_filename = dataset.filename_at(indices[i])
+        stem = Path(src_filename).stem   # e.g. "fake_00001_suno_0"
+
         with torch.no_grad():
             pred_orig = model(wav).argmax(-1).item()
 
@@ -330,9 +338,17 @@ def main() -> None:
         d_rms = result.delta.pow(2).mean().sqrt().item()
         snr = _snr_db(wav.cpu(), result.delta.cpu())
 
+        # ── Save audio ────────────────────────────────────────────────────────
+        sr = ds_cfg.sample_rate
+        torchaudio.save(str(audio_dir / f"orig_{stem}.wav"),
+                        wav.cpu().unsqueeze(0), sr)
+        torchaudio.save(str(audio_dir / f"adv_{stem}.wav"),
+                        result.x_adv.cpu().unsqueeze(0), sr)
+
         records.append(
             {
                 "sample_id": i,
+                "source_file": src_filename,
                 "true_label": label.item(),
                 "pred_orig": pred_orig,
                 "pred_adv": pred_adv,
@@ -345,19 +361,24 @@ def main() -> None:
                 "delta_linf": round(d_linf, 8),
                 "delta_rms": round(d_rms, 8),
                 "snr_db": round(snr, 2) if math.isfinite(snr) else None,
+                # Audio file paths (relative to out_dir)
+                "audio_orig": f"audio/orig_{stem}.wav",
+                "audio_adv":  f"audio/adv_{stem}.wav",
             }
         )
         histories.append(result.history)
 
-        # Log to TensorBoard
-        writer.add_scalar("Metrics/cosine_sim", cos_sim, i)
-        writer.add_scalar("Metrics/topk_overlap_10pct", overlap, i)
-        writer.add_scalar("Metrics/heatmap_ssim", ssim, i)
-        writer.add_scalar("Perturbation/delta_linf", d_linf, i)
-        writer.add_scalar("Perturbation/delta_rms", d_rms, i)
+        # Log to TensorBoard — tag includes the source filename for traceability.
+        writer.add_scalar(f"Metrics/cosine_sim", cos_sim, i)
+        writer.add_scalar(f"Metrics/topk_overlap_10pct", overlap, i)
+        writer.add_scalar(f"Metrics/heatmap_ssim", ssim, i)
+        writer.add_scalar(f"Perturbation/delta_linf", d_linf, i)
+        writer.add_scalar(f"Perturbation/delta_rms", d_rms, i)
         if math.isfinite(snr):
-            writer.add_scalar("Perturbation/snr_db", snr, i)
-        writer.add_scalar("Results/prediction_preserved", float(result.prediction_preserved.item()), i)
+            writer.add_scalar(f"Perturbation/snr_db", snr, i)
+        writer.add_scalar(f"Results/prediction_preserved",
+                          float(result.prediction_preserved.item()), i)
+        writer.add_text("Sample/source_file", src_filename, i)
 
         del result, wav
         gc.collect()
