@@ -19,11 +19,12 @@ predict:
   device: cuda
 
 attack:
-  n_attack_samples: 1000
-  micro_batch: 1      # Reduced from 4 to 1 to avoid GPU OOM on AST
-  n_steps: 50
+  n_attack_samples: 100
+  micro_batch: 4      # Reduced from 4 to 1 to avoid GPU OOM on AST
+  n_steps: 100
   lr: 1.0e-3
-  lambda_aud: 1.0
+  lambda_aud: 0.5
   lambda_pred: 100.0
+  pred_margin: 0.1
   log_dir: runs/attack
   device: cuda
