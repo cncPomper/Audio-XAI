@@ -8,6 +8,10 @@ XAI for audio models
 * Created by [Piotr Kitłowski](https://audrey.feldroy.com/) | GitHub [@cncPomper](https://github.com/cncPomper) | PyPI [@pkitlo](https://pypi.org/user/pkitlo/)
 * MIT License
 
+## Data
+
+https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data
+
 ## Features
 
 * TODO
