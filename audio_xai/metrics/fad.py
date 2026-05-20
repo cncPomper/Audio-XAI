@@ -1,4 +1,4 @@
-from __future__ import annotations  # <-- Add this at the absolute top
+from __future__ import annotations
 import torch
 import numpy as np
 
@@ -7,6 +7,8 @@ from functools import partial
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
 import logging
+
+from audio_xai.metrics.audio_metrics import ensure_tensor, ensure_ndarray
 
 
 KEY_METRIC_KID_MEAN = "kernel_distance_mean"

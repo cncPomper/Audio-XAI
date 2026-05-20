@@ -633,45 +633,62 @@ def _save_sample_images(
     """Save spectrograms, CAM heatmaps, overlays, and a summary panel as PNGs."""
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    def _spec_hwc(wav: torch.Tensor) -> np.ndarray:
-        return _make_spectrogram_image(wav, sample_rate, max_seconds=None).permute(1, 2, 0).numpy()
+    def _spec_hwc(wav: torch.Tensor, cmap: str = "inferno") -> np.ndarray:
+        return _make_spectrogram_image(wav, sample_rate, max_seconds=None, cmap=cmap).permute(1, 2, 0).numpy()
+
+    def _to_gray(rgb: np.ndarray) -> np.ndarray:
+        """[H,W,3] float RGB → [H,W,3] luminance grayscale."""
+        g = 0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2]
+        return np.stack([g, g, g], axis=-1)
 
     def _cam_hwc(cam: np.ndarray, ref_shape: tuple) -> np.ndarray:
         if cam.ndim == 1:
             cam = cam[np.newaxis, :]   # [T] → [1, T]: treat as freq=1 time map
         t = torch.from_numpy(cam).unsqueeze(0).unsqueeze(0).float()
         t = F.interpolate(t, size=ref_shape, mode="bilinear", align_corners=False)
-        return _heatmap_to_rgb(t.squeeze().numpy())
+        return _heatmap_to_rgb(t.squeeze().numpy(), cmap="hot")
 
+    # Original-colour spectrograms (inferno) — kept for individual files
     spec_orig  = _spec_hwc(orig_wav)
     spec_adv   = _spec_hwc(adv_wav)
-    spec_delta = _spec_hwc(delta_wav)
+    # Delta uses the same "hot" colormap as the CAM heatmaps
+    spec_delta = _spec_hwc(delta_wav, cmap="hot")
     H, W = spec_orig.shape[:2]
+
+    # Grayed spectrograms — used in the panel so CAMs stand out clearly
+    spec_orig_gray = _to_gray(spec_orig)
+    spec_adv_gray  = _to_gray(spec_adv)
 
     hmap_orig = _cam_hwc(cam_orig, (H, W))
     hmap_adv  = _cam_hwc(cam_adv,  (H, W))
-    ov_orig   = np.clip(0.55 * spec_orig + 0.45 * hmap_orig, 0, 1)
-    ov_adv    = np.clip(0.55 * spec_adv  + 0.45 * hmap_adv,  0, 1)
+    ov_orig   = np.clip(0.55 * spec_orig_gray + 0.45 * hmap_orig, 0, 1)
+    ov_adv    = np.clip(0.55 * spec_adv_gray  + 0.45 * hmap_adv,  0, 1)
 
-    plt.imsave(str(sample_dir / "spectrogram_original.png"),    spec_orig)
-    plt.imsave(str(sample_dir / "spectrogram_adversarial.png"), spec_adv)
-    plt.imsave(str(sample_dir / "spectrogram_delta.png"),       spec_delta)
-    plt.imsave(str(sample_dir / "heatmap_original.png"),        hmap_orig)
-    plt.imsave(str(sample_dir / "heatmap_adversarial.png"),     hmap_adv)
-    plt.imsave(str(sample_dir / "overlay_original.png"),        ov_orig)
-    plt.imsave(str(sample_dir / "overlay_adversarial.png"),     ov_adv)
+    # Individual files: original-colour + gray variants + hot delta
+    plt.imsave(str(sample_dir / "spectrogram_original.png"),      spec_orig)
+    plt.imsave(str(sample_dir / "spectrogram_adversarial.png"),   spec_adv)
+    plt.imsave(str(sample_dir / "spectrogram_original_gray.png"), spec_orig_gray)
+    plt.imsave(str(sample_dir / "spectrogram_adversarial_gray.png"), spec_adv_gray)
+    plt.imsave(str(sample_dir / "spectrogram_delta.png"),         spec_delta)
+    plt.imsave(str(sample_dir / "heatmap_original.png"),          hmap_orig)
+    plt.imsave(str(sample_dir / "heatmap_adversarial.png"),       hmap_adv)
+    plt.imsave(str(sample_dir / "overlay_original.png"),          ov_orig)
+    plt.imsave(str(sample_dir / "overlay_adversarial.png"),       ov_adv)
 
     true_lbl  = "real" if label == 0 else "fake"
     porig_lbl = "real" if pred_orig == 0 else "fake"
     padv_lbl  = "real" if pred_adv  == 0 else "fake"
-    fig, axes = plt.subplots(2, 3, figsize=(15, 6))
+
+    # Panel: 2×3 grid
+    #   col 1 — gray spectrogram   col 2 — CAM heatmap   col 3 — CAM overlaid on gray spec
+    fig, axes = plt.subplots(2, 3, figsize=(18, 6))
     for ax, img, ttl in zip(axes[0],
-                             [spec_orig, hmap_orig, ov_orig],
-                             ["Original spectrogram", "Original CAM", "Original overlay"]):
+                             [spec_orig_gray, hmap_orig, ov_orig],
+                             ["Original spectrogram (gray)", "Original CAM", "Original overlay"]):
         ax.imshow(img, aspect="auto", origin="upper"); ax.set_title(ttl, fontsize=9); ax.axis("off")
     for ax, img, ttl in zip(axes[1],
-                             [spec_adv, hmap_adv, ov_adv],
-                             ["Adversarial spectrogram", "Adversarial CAM", "Adversarial overlay"]):
+                             [spec_adv_gray, hmap_adv, ov_adv],
+                             ["Adversarial spectrogram (gray)", "Adversarial CAM", "Adversarial overlay"]):
         ax.imshow(img, aspect="auto", origin="upper"); ax.set_title(ttl, fontsize=9); ax.axis("off")
     fig.suptitle(
         f"{stem}  |  true={true_lbl}  "

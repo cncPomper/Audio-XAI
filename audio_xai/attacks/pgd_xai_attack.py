@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from tqdm import tqdm
 
 from audio_xai.models.base import AudioClassifier
@@ -138,11 +139,12 @@ def pgd_xai_attack(
         x_adv = torch.clamp(x + delta, -1.0, 1.0)
 
         # create_graph=True: adv_sal and adv_logits are differentiable w.r.t. delta.
-        # retain_graph is implicitly True when create_graph=True, so adv_logits
-        # remains valid after the autograd.grad call inside _compute_saliency.
-        adv_logits, adv_sal = _compute_saliency(
-            model, x_adv, pred_orig, create_graph=True
-        )
+        # MATH backend required: flash/efficient attention don't implement the
+        # second-order backward that goes through autograd.grad(..., create_graph=True).
+        with sdpa_kernel([SDPBackend.MATH]):
+            adv_logits, adv_sal = _compute_saliency(
+                model, x_adv, pred_orig, create_graph=True
+            )
         adv_sal_flat = _flatten_normalize(adv_sal)
 
         # L_explain: cosine similarity (minimise → explanation diverges)
