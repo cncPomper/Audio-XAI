@@ -12,7 +12,8 @@ XAI for audio models
 
 ## Data
 
-https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data
+* https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data
+* https://www.kaggle.com/datasets/awsaf49/sonics-dataset
 
 ## Features
 
