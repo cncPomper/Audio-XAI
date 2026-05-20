@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from tqdm import tqdm
 
 from audio_xai.metrics.psychoacoustic import (
@@ -126,13 +127,12 @@ def perceptual_xai_attack(
         threshold_db = masking_threshold(x.cpu(), sample_rate=cfg.sample_rate)
 
     # Original CAM is computed once and detached — it's our reference target.
-    # Use memory-efficient flash/efficient SDP here: only first-order gradients
-    # are needed (create_graph=False), so math SDP's O(N²) attention matrices
-    # are unnecessary and waste several GiB on large batches.
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
-    cam_original = gradcam(x, target_class=pred_orig, create_graph=False).detach()
+    # Use memory-efficient attention here: only first-order gradients are needed
+    # (create_graph=False), so math SDP's O(N²) attention matrices are unnecessary.
+    # sdpa_kernel is the PyTorch 2.x API; the deprecated enable_*_sdp() globals are
+    # unreliable in 2.7+ and caused EFFICIENT_ATTENTION to leak into the second-order loop.
+    with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+        cam_original = gradcam(x, target_class=pred_orig, create_graph=False).detach()
     cam_orig_flat = _flatten_normalize(cam_original)
     torch.cuda.empty_cache()
 
@@ -141,12 +141,6 @@ def perceptual_xai_attack(
     optimizer = torch.optim.Adam([delta], lr=cfg.lr)
 
     history: list[dict] = []
-
-    # Efficient/Flash attention backends don't implement second-order gradients,
-    # which are required to backprop through Grad-CAM. Force the math backend.
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
 
     # Gradient checkpointing: recompute per-layer activations on-the-fly during
     # the second-order backward instead of keeping the full graph in VRAM.
@@ -174,7 +168,10 @@ def perceptual_xai_attack(
         # 1. Explanation loss: minimize cosine similarity to the original CAM.
         # return_logits=True reuses the logits from the Grad-CAM forward pass,
         # avoiding a second full model forward pass and halving peak GPU memory.
-        cam_adv, logits_adv = gradcam(x_adv, target_class=pred_orig, create_graph=True, return_logits=True)
+        # MATH backend is required: flash/efficient don't implement the
+        # second-order backward needed to differentiate through Grad-CAM.
+        with sdpa_kernel([SDPBackend.MATH]):
+            cam_adv, logits_adv = gradcam(x_adv, target_class=pred_orig, create_graph=True, return_logits=True)
         cam_adv_flat = _flatten_normalize(cam_adv)
         cos_sim = (cam_orig_flat * cam_adv_flat).sum(dim=1)
         loss_explain = cos_sim.mean()
@@ -238,13 +235,6 @@ def perceptual_xai_attack(
         model.backbone.gradient_checkpointing_disable()
         model.backbone.eval()
 
-    # Switch back to flash/efficient SDP for the first-order final evaluation.
-    # Math SDP was required for the second-order attack loop; flash SDP is
-    # O(N) memory and sufficient for create_graph=False.
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
-
     # Free GPU memory once after the full loop, not on every step.
     # Calling empty_cache() every step forces a CUDA sync that keeps GPU utilisation low.
     torch.cuda.empty_cache()
@@ -261,7 +251,9 @@ def perceptual_xai_attack(
 
     # Grad-CAM requires gradients to compute even at eval time (it differentiates
     # the model output w.r.t. activations). Only the resulting heatmap is detached.
-    cam_adv_final = gradcam(x_adv_final, target_class=pred_orig, create_graph=False).detach()
+    # First-order only (create_graph=False), so efficient attention is safe here.
+    with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+        cam_adv_final = gradcam(x_adv_final, target_class=pred_orig, create_graph=False).detach()
     with torch.no_grad():
         cos_sim_final = (_flatten_normalize(cam_original) * _flatten_normalize(cam_adv_final)).sum(dim=1)
 

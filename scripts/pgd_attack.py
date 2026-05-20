@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import gc
 import json
 import os
@@ -163,6 +164,36 @@ def _attack_full_audio_pgd(
     return x_adv_full, delta_full, window_result
 
 
+# ── CDPAM & FAD helpers ───────────────────────────────────────────────────────
+
+_CDPAM_SR = 22050
+try:
+    import cdpam as _cdpam_mod
+    _CDPAM_AVAILABLE = True
+except ImportError:
+    _cdpam_mod = None
+    _CDPAM_AVAILABLE = False
+
+from audio_xai.metrics.audio_metrics import AudioMetricsData
+from audio_xai.metrics.fad import kernel_distance
+
+
+def _resample_for_cdpam(wav: torch.Tensor, sr: int) -> np.ndarray:
+    """Resample waveform to 22050 Hz and scale to int16 range for CDPAM."""
+    if sr != _CDPAM_SR:
+        wav = torchaudio.functional.resample(wav.cpu(), sr, _CDPAM_SR)
+    arr = wav.cpu().numpy()
+    return np.round(arr.astype(np.float64) * 32768.0).astype(np.float32).reshape(1, -1)
+
+
+def _mel_embedding(wav: torch.Tensor, sr: int, n_mels: int = 128) -> np.ndarray:
+    """Log-mel mean embedding for FAD accumulation; shape (n_mels,)."""
+    mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=sr, n_fft=1024, hop_length=512, n_mels=n_mels,
+    )(wav.cpu().unsqueeze(0) if wav.ndim == 1 else wav.cpu())
+    return torch.log1p(mel).mean(dim=-1).squeeze(0).numpy()
+
+
 # ── Lightning attack module ───────────────────────────────────────────────────
 
 class PGDAttackModule(LightningModule):
@@ -191,6 +222,11 @@ class PGDAttackModule(LightningModule):
         self.sw_micro_bs  = sw_micro_bs
         self.log_path     = log_path
         self.audio_dir    = log_path / "audio"
+        # FAD accumulation (log-mel embeddings for original vs adversarial)
+        self.orig_amd: AudioMetricsData = AudioMetricsData(store_embeddings=True)
+        self.adv_amd:  AudioMetricsData = AudioMetricsData(store_embeddings=True)
+        # CDPAM lazy-init (expensive model load, done once on first sample)
+        self._cdpam_fn = None
 
     @torch.enable_grad()
     def predict_step(self, batch, batch_idx: int) -> dict:
@@ -290,6 +326,25 @@ class PGDAttackModule(LightningModule):
                 )
                 print(f"  {psy_str}")
 
+                # CDPAM per-sample perceptual distance
+                cdpam_val: float | None = None
+                if _CDPAM_AVAILABLE:
+                    try:
+                        if self._cdpam_fn is None:
+                            _orig_load = torch.load
+                            torch.load = functools.partial(_orig_load, weights_only=False)
+                            try:
+                                dev_str = str(dev) if "cuda" in str(dev) else "cpu"
+                                self._cdpam_fn = _cdpam_mod.CDPAM(dev=dev_str)
+                            finally:
+                                torch.load = _orig_load
+                        _c_orig = _resample_for_cdpam(orig_cpu, self.sample_rate)
+                        _c_adv  = _resample_for_cdpam(adv_cpu, self.sample_rate)
+                        cdpam_val = float(self._cdpam_fn.forward(_c_orig, _c_adv).item())
+                        print(f"  CDPAM={cdpam_val:.4f}")
+                    except Exception as _ce:
+                        print(f"  CDPAM error: {_ce}")
+
                 sample_metrics = {
                     "index":          index_var,
                     "stem":           path.stem,
@@ -307,6 +362,7 @@ class PGDAttackModule(LightningModule):
                     "delta_linf":     round(delta_linf, 6),
                     **{k: (round(v, 6) if isinstance(v, float) else v)
                        for k, v in psy.items()},
+                    "cdpam":          round(cdpam_val, 6) if cdpam_val is not None else None,
                     "ok": True,
                 }
 
@@ -355,6 +411,13 @@ class PGDAttackModule(LightningModule):
                         pred_orig   = int(pred_orig.item()),
                         pred_adv    = int(pred_adv.item()),
                     )
+
+                # FAD embedding accumulation (log-mel mean, shape n_mels)
+                try:
+                    self.orig_amd.add(_mel_embedding(orig_cpu, self.sample_rate))
+                    self.adv_amd.add(_mel_embedding(adv_cpu, self.sample_rate))
+                except Exception as _fe:
+                    print(f"  FAD embed error: {_fe}")
 
                 result = {**sample_metrics, "history": history}
                 break
@@ -505,8 +568,7 @@ def main() -> None:
 
     # ── 4. Setup logging ──────────────────────────────────────────────────────
     ckpt_tag = Path(args.checkpoint).stem if args.checkpoint else args.model_id.replace("/", "_")
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    run_name = args.run_name or f"pgd_{args.model_type}_{ckpt_tag}_{args.split}_{ts}"
+    run_name = args.run_name or f"pgd_{args.model_type}_{ckpt_tag}_{args.split}_{args.n_attack_samples}_samples"
 
     tb_logger = TensorBoardLogger(
         save_dir=str(args.log_dir),
@@ -617,7 +679,7 @@ def main() -> None:
     all_pred_pres     = [r["pred_preserved"] for r in results]
     all_delta_linf    = [r["delta_linf"]     for r in results]
     all_audio_quality = [
-        {k: r.get(k) for k in ("pesq", "stoi", "visqol", "peaq", "zimtohrli")}
+        {k: r.get(k) for k in ("pesq", "stoi", "visqol", "peaq", "zimtohrli", "cdpam")}
         for r in results
     ]
     all_histories = [r.get("history", []) for r in results]
@@ -650,7 +712,7 @@ def main() -> None:
 
     print("\n── Perceptual audio quality metrics (orig → adv) ───────────────────")
     perceptual_means: dict[str, float] = {}
-    for key in ("pesq", "stoi", "visqol", "peaq", "zimtohrli"):
+    for key in ("pesq", "stoi", "visqol", "peaq", "zimtohrli", "cdpam"):
         vals = [m[key] for m in all_audio_quality
                 if m.get(key) is not None
                 and not (isinstance(m[key], float) and np.isnan(m[key]))]
@@ -659,11 +721,28 @@ def main() -> None:
                   f"[{min(vals):.3f} … {max(vals):.3f}]  n={len(vals)}")
             perceptual_means[f"mean_{key}"] = float(np.mean(vals))
 
+    # Kernel Distance (KID) over log-mel embeddings — dataset-level FAD alternative
+    kd_mean: float | None = None
+    kd_std:  float | None = None
+    if module.orig_amd.n >= 2 and module.adv_amd.n >= 2:
+        try:
+            kd_result = kernel_distance(module.orig_amd, module.adv_amd)
+            kd_mean = kd_result["kernel_distance_mean"]
+            kd_std  = kd_result["kernel_distance_std"]
+            print(f"  {'KD (KID)':10s}: mean={kd_mean:.6f}  std={kd_std:.6f}  "
+                  f"(kernel distance, log-mel embeddings)")
+            perceptual_means["kernel_distance_mean"] = kd_mean
+            perceptual_means["kernel_distance_std"]  = kd_std
+        except Exception as _kd_e:
+            print(f"  Kernel Distance failed: {_kd_e}")
+
     atk_summary = {
         "mean_cos_sim":        mean_cos,
         "top10_overlap":       mean_over,
         "delta_linf":          mean_linf,
         "pred_preserved_frac": pred_pres_frac,
+        "kernel_distance_mean": kd_mean,
+        "kernel_distance_std":  kd_std,
     }
 
     summary: dict = {
