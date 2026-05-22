@@ -358,6 +358,28 @@ class TransformerLRP(LRPBase):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sonics (SpecTTTra) — AttnLRP via Gradient × Input on STTokenizer output
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SonicsLRP(TransformerLRP):
+    """AttnLRP for SonicsWrapper (SpecTTTra encoder).
+
+    Hooks the STTokenizer output [B, N_tokens, D] where
+    N_tokens = temporal_tokens + spectral_tokens (no special tokens).
+    Returns [B, 1, N_tokens] so lrp_chunked can concatenate along the time axis.
+    """
+
+    def __init__(self, model: AudioClassifier, eps: float = 1e-6):
+        super().__init__(model, eps, num_special_tokens=0)
+
+    def _embedding_layer(self) -> nn.Module:
+        return self.model._m.encoder.st_tokenizer
+
+    def _to_heatmap(self, relevance: torch.Tensor, device: torch.device) -> torch.Tensor:
+        return relevance.clamp(min=0).unsqueeze(1)  # [B, 1, N_tokens]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Factory
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -370,6 +392,8 @@ def make_lrp(model: AudioClassifier, eps: float = 1e-6) -> LRPBase:
         return TransformerLRP(model, eps=eps)
     if cls == "Wav2Vec2Binary":
         return TransformerLRP(model, eps=eps)
+    if cls == "SonicsWrapper":
+        return SonicsLRP(model, eps=eps)
     raise ValueError(
         f"No LRP variant registered for {cls}. "
         "Add it to make_lrp() or subclass LRPBase directly."

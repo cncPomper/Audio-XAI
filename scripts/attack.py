@@ -68,34 +68,9 @@ from audio_xai.fetching_and_metrics.preprocessing_metrics import (
 )
 from audio_xai.models.ast_binary import ASTBinary, AST_SAMPLE_RATE
 from audio_xai.models.base import AudioClassifier
+from audio_xai.models.sonics_wrapper import SonicsWrapper as _SonicsWrapper
 from audio_xai.models.vggish_binary import VGGishBinary, VGGISH_SAMPLE_RATE
 from audio_xai.xai.gradcam import GradCAMBase, make_gradcam
-
-
-# ── Sonics wrapper (for Grad-CAM / attack) ────────────────────────────────────
-
-class _SonicsWrapper(AudioClassifier):
-    """Adapts HFAudioClassifier to AudioClassifier so make_gradcam / attack work."""
-
-    def __init__(self, sonics_model) -> None:
-        nn.Module.__init__(self)
-        self._m = sonics_model
-
-    def waveform_to_features(self, waveform: torch.Tensor) -> torch.Tensor:
-        spec = self._m.ft_extractor(waveform)
-        spec = spec.unsqueeze(1)
-        return F.interpolate(
-            spec, size=tuple(self._m.input_shape), mode="bilinear", align_corners=False
-        )
-
-    def features_to_logits(self, features: torch.Tensor) -> torch.Tensor:
-        tokens = self._m.encoder(features)
-        embeds = tokens.mean(dim=1)
-        return self._m.classifier(embeds)
-
-    @property
-    def target_layer(self) -> nn.Module:
-        return self._m.encoder.transformer.blocks[-1]
 
 
 class _SonicsGradCAM(GradCAMBase):
