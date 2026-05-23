@@ -16,7 +16,8 @@ https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data
 
 ## Features
 
-* TODO
+* Grad-CAM (Gradient-weighted Class Activation Mapping)
+* LRP (Layer-wise Relevance Propagation)
 
 ## Documentation
 
