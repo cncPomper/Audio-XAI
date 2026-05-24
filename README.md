@@ -1,5 +1,7 @@
 # Audio XAI
 
+📜 link to article (soon)
+
 ![PyPI version](https://img.shields.io/pypi/v/Audio-XAI.svg)
 [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/collections/ARRSi/audio-xai)
 [![Kaggle](https://img.shields.io/badge/Kaggle-035a7d?style=for-the-badge&logo=kaggle&logoColor=white)](https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data)
