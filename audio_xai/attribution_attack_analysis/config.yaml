@@ -1,0 +1,43 @@
+experiments:
+  - model: AST
+    attack: Psychoacoustic
+    path: ""
+  - model: AST
+    attack: PGD
+    path: ""
+  - model: AST
+    attack: X-Shift
+    path: ""
+
+  - model: VGG
+    attack: Psychoacoustic
+    path: ""
+  - model: VGG
+    attack: PGD
+    path: ""
+  - model: VGG
+    attack: X-Shift
+    path: ""
+
+  - model: SPECTR
+    attack: Psychoacoustic
+    path: ""
+  - model: SPECTR
+    attack: PGD
+    path: ""
+  - model: SPECTR
+    attack: X-Shift
+    path: ""
+
+output_dir: outputs
+
+thresholds:
+  decision_threshold: 0.5
+  cos_threshold: 0.4
+  top10_threshold: 0.3
+  near_boundary_margin: 0.1
+
+quality_thresholds:
+  pesq: 3.0
+  stoi: 0.85
+  visqol: 3.3
