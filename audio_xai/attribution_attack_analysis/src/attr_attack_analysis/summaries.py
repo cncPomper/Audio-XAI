@@ -13,7 +13,7 @@ def _optional_aggs(df: pd.DataFrame) -> dict[str, tuple[str, str]]:
         "visqol_median": ("visqol", "median"),
         "peaq_median": ("peaq", "median"),
         "zimtohrli_median": ("zimtohrli", "median"),
-        "cdpam_median": ("cdpam_norm", "median"),
+        "cdpam_median": ("cdpam", "median"),
     }
     return {out: spec for out, spec in optional_specs.items() if spec[0] in df.columns}
 
