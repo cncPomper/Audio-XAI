@@ -5,4 +5,4 @@ PyYAML
 plotly
 soundfile
 scipy
-python normalize_attack_json_schema.py "C:/Users/domin/Downloads/xshift_ast" "C:/Users/domin/Downloads/xshift_vggish" "C:/Users/domin/Downloads/xshift_sonics" 
+scipy
