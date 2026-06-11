@@ -20,8 +20,6 @@ def plot_all_interactive_plots(
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         import plotly.express as px
-        from plotly.subplots import make_subplots
-        import plotly.graph_objects as go
     except Exception:
         (out_dir / "README_plotly_missing.md").write_text(
             "# Dashboard interaktywny nie został wygenerowany\n\n"
