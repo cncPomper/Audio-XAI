@@ -23,12 +23,17 @@ _INDIVIDUAL_DIR = _REPO_ROOT / "audio_xai" / "attribution_attack_analysis" / "in
 def _import_script(script_path: Path):
     """Import a standalone .py script as a module."""
     spec = importlib.util.spec_from_file_location(script_path.stem, script_path)
-    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    if spec is None:
+        raise ImportError(f"Cannot create module spec for {script_path}")
+    if spec.loader is None:
+        raise ImportError(f"No loader available for {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
     return module
 
 
-# Import the modules once at collection time.
+
 normalize_mod = _import_script(_AUXILIARY_DIR / "normalize_attack_json_schema.py")
 replace_mod = _import_script(_AUXILIARY_DIR / "replace_xshift.py")
 analyze_mod = _import_script(_INDIVIDUAL_DIR / "analyze_audio_easy_hard.py")
