@@ -1,7 +1,6 @@
-from pathlib import Path
+import argparse
 import json
-
-ROOT_DIR = Path(rf"C:/Users/domin/Downloads/jsony/jsony/xshift")
+from pathlib import Path
 
 KEY_RENAMES = {
     "lrp_cos_sim": "cos_sim",
@@ -21,10 +20,7 @@ def rename_keys(obj):
             new_key = KEY_RENAMES.get(key, key)
 
             if new_key in new_obj:
-                raise ValueError(
-                    f"Kolizja kluczy: po zmianie '{key}' na '{new_key}' "
-                    f"klucz już istnieje w tym samym obiekcie JSON."
-                )
+                raise ValueError(f"Kolizja kluczy: po zmianie '{key}' na '{new_key}' klucz już istnieje w tym samym obiekcie JSON.")
 
             new_obj[new_key] = rename_keys(value)
 
@@ -48,8 +44,15 @@ def process_json_file(path: Path):
     return True
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("root_dir", nargs="?", default=Path.cwd(), type=Path)
+    return parser.parse_args()
+
+
 def main():
-    json_files = list(ROOT_DIR.rglob("*.json"))
+    args = _parse_args()
+    json_files = list(args.root_dir.rglob("*.json"))
 
     print(f"Znaleziono plików JSON: {len(json_files)}")
 
