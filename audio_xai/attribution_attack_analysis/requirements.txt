@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+PyYAML
+plotly
+soundfile
+scipy
+scipy
