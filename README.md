@@ -1,6 +1,6 @@
 # Audio XAI
 
-📜 link to article (soon)
+[📜 link to article](https://arxiv.org/abs/2606.14466)
 
 ![PyPI version](https://img.shields.io/pypi/v/Audio-XAI.svg)
 [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/collections/ARRSi/audio-xai)
