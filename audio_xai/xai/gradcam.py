@@ -195,6 +195,21 @@ class TransformerGradCAM(GradCAMBase):
         return F.relu(cam)
 
 
+class SonicsGradCAM(GradCAMBase):
+    """Grad-CAM for SonicsWrapper (SpecTTTra encoder).
+
+    Target layer is the last TransformerBlock whose activations are
+    [B, N_tokens, D] (no special tokens). Returns [B, N_tokens] heatmap —
+    the same 1-D token relevance used by the attack loop.
+    """
+
+    def _build_heatmap(self, activations: torch.Tensor, gradients: torch.Tensor) -> torch.Tensor:
+        # Average gradient over embedding dim to get per-token weight.
+        weights = gradients.mean(dim=2, keepdim=True)  # [B, N, 1]
+        cam = (weights * activations).sum(dim=2)        # [B, N]
+        return F.relu(cam)
+
+
 def make_gradcam(model: AudioClassifier) -> GradCAMBase:
     """Select the appropriate Grad-CAM variant for the given model."""
     cls_name = type(model).__name__
@@ -211,4 +226,6 @@ def make_gradcam(model: AudioClassifier) -> GradCAMBase:
             freq_patches=1,        # 1-D time sequence; "freq" dim = 1
             time_patches=None,     # inferred at call time from T'
         )
+    if cls_name == "SonicsWrapper":
+        return SonicsGradCAM(model)
     raise ValueError(f"No Grad-CAM variant registered for {cls_name}")
