@@ -3,6 +3,7 @@
 [[📄 poster](./poster%202026%20ICML%20v7.pdf)][[📜 link to article](https://arxiv.org/abs/2606.14466)][[ICML 2026](https://mlforaudioworkshop.github.io/accepted_submissions_2026/CameraReadys%204-83/13/CameraReady/paper_compressed.pdf)]
 
 ![PyPI version](https://img.shields.io/pypi/v/Audio-XAI.svg)
+[![CodeQL](https://github.com/cncPomper/Audio-XAI/actions/workflows/codeql.yml/badge.svg)](https://github.com/cncPomper/Audio-XAI/actions/workflows/codeql.yml)
 [![HuggingFace](https://img.shields.io/badge/huggingface-%23FFD21E.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/collections/ARRSi/audio-xai)
 [![Kaggle](https://img.shields.io/badge/Kaggle-035a7d?style=for-the-badge&logo=kaggle&logoColor=white)](https://www.kaggle.com/datasets/piotrkitowski/audio-xai-attack/data)
 
